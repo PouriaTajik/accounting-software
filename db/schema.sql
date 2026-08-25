@@ -45,6 +45,39 @@ CREATE SCHEMA ledger_query;
 
 
 --
+-- Name: btree_gist; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public;
+
+
+--
+-- Name: EXTENSION btree_gist; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON EXTENSION btree_gist IS 'support for indexing common datatypes in GiST';
+
+
+--
+-- Name: account_normal_balance_default(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.account_normal_balance_default() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.normal_balance IS NULL THEN
+        NEW.normal_balance := CASE
+            WHEN NEW.type IN ('asset', 'expense') THEN 'debit'
+            ELSE 'credit'
+        END;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: app_current_workspace(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -252,6 +285,57 @@ $$;
 
 
 --
+-- Name: guard_posting_period_is_open(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_posting_period_is_open() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    locked_through date;
+    closed_year    text;
+BEGIN
+    IF NEW.posted_at IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    -- Already posted before this statement: immutability owns that case.
+    IF TG_OP = 'UPDATE' AND OLD.posted_at IS NOT NULL THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT w.books_locked_through INTO locked_through
+      FROM workspaces w WHERE w.id = NEW.workspace_id;
+
+    IF locked_through IS NOT NULL AND NEW.entry_date <= locked_through THEN
+        RAISE EXCEPTION
+            'journal_entries: books are locked through %, so an entry dated % '
+            'cannot be posted. Date it later, or move the lock.',
+            locked_through, NEW.entry_date
+            USING ERRCODE = 'restrict_violation';
+    END IF;
+
+    SELECT f.label INTO closed_year
+      FROM fiscal_years f
+     WHERE f.workspace_id = NEW.workspace_id
+       AND f.closed_at IS NOT NULL
+       AND NEW.entry_date BETWEEN f.starts_on AND f.ends_on;
+
+    IF closed_year IS NOT NULL THEN
+        RAISE EXCEPTION
+            'journal_entries: fiscal year % is closed, so an entry dated % '
+            'cannot be posted. Reopen the year, or post the correction to the '
+            'open one.',
+            closed_year, NEW.entry_date
+            USING ERRCODE = 'restrict_violation';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: guard_workspace_keeps_an_owner(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -348,8 +432,12 @@ CREATE TABLE public.accounts (
     version integer DEFAULT 1 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    normal_balance text NOT NULL,
+    cash_flow_category text,
+    CONSTRAINT accounts_cash_flow_category_known CHECK (((cash_flow_category IS NULL) OR (cash_flow_category = ANY (ARRAY['operating'::text, 'investing'::text, 'financing'::text])))),
     CONSTRAINT accounts_code_check CHECK ((length(TRIM(BOTH FROM code)) > 0)),
     CONSTRAINT accounts_name_check CHECK ((length(TRIM(BOTH FROM name)) > 0)),
+    CONSTRAINT accounts_normal_balance_known CHECK ((normal_balance = ANY (ARRAY['debit'::text, 'credit'::text]))),
     CONSTRAINT accounts_parent_not_self CHECK ((parent_account_id <> id)),
     CONSTRAINT accounts_type_check CHECK ((type = ANY (ARRAY['asset'::text, 'liability'::text, 'equity'::text, 'revenue'::text, 'expense'::text])))
 );
@@ -424,7 +512,7 @@ CREATE TABLE public.journal_entries (
     posted_by_user_id uuid,
     CONSTRAINT journal_entries_reversal_is_sourced CHECK (((reverses_entry_id IS NULL) OR (source = 'reversal'::text))),
     CONSTRAINT journal_entries_reversal_not_self CHECK ((reverses_entry_id <> id)),
-    CONSTRAINT journal_entries_source_check CHECK ((source = ANY (ARRAY['manual'::text, 'ocr_import'::text, 'csv_import'::text, 'ai_categorized'::text, 'reversal'::text])))
+    CONSTRAINT journal_entries_source_check CHECK ((source = ANY (ARRAY['manual'::text, 'ocr_import'::text, 'csv_import'::text, 'ai_categorized'::text, 'reversal'::text, 'period_close'::text])))
 );
 
 
@@ -567,6 +655,27 @@ CREATE TABLE public.documents (
 
 
 --
+-- Name: fiscal_years; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.fiscal_years (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    label text NOT NULL,
+    starts_on date NOT NULL,
+    ends_on date NOT NULL,
+    closed_at timestamp with time zone,
+    closed_by_user_id uuid,
+    version integer DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT fiscal_years_closer_implies_closed CHECK (((closed_by_user_id IS NULL) OR (closed_at IS NOT NULL))),
+    CONSTRAINT fiscal_years_ends_after_start CHECK ((ends_on > starts_on)),
+    CONSTRAINT fiscal_years_label_check CHECK ((length(TRIM(BOTH FROM label)) > 0))
+);
+
+
+--
 -- Name: schema_migrations; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -642,9 +751,12 @@ CREATE TABLE public.workspaces (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     display_unit text,
     display_exponent smallint DEFAULT 0 NOT NULL,
+    fiscal_calendar text DEFAULT 'gregorian'::text NOT NULL,
+    books_locked_through date,
     CONSTRAINT workspaces_display_exponent_sane CHECK (((display_exponent >= 0) AND (display_exponent <= 6))),
     CONSTRAINT workspaces_display_shift_is_named CHECK (((display_exponent = 0) OR (display_unit IS NOT NULL))),
     CONSTRAINT workspaces_display_unit_not_blank CHECK (((display_unit IS NULL) OR (length(TRIM(BOTH FROM display_unit)) > 0))),
+    CONSTRAINT workspaces_fiscal_calendar_known CHECK ((fiscal_calendar = ANY (ARRAY['gregorian'::text, 'solar_hijri'::text]))),
     CONSTRAINT workspaces_name_check CHECK ((length(TRIM(BOTH FROM name)) > 0))
 );
 
@@ -719,6 +831,38 @@ ALTER TABLE ONLY public.devices
 
 ALTER TABLE ONLY public.documents
     ADD CONSTRAINT documents_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: fiscal_years fiscal_years_do_not_overlap; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.fiscal_years
+    ADD CONSTRAINT fiscal_years_do_not_overlap EXCLUDE USING gist (workspace_id WITH =, daterange(starts_on, ends_on, '[]'::text) WITH &&);
+
+
+--
+-- Name: fiscal_years fiscal_years_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.fiscal_years
+    ADD CONSTRAINT fiscal_years_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: fiscal_years fiscal_years_workspace_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.fiscal_years
+    ADD CONSTRAINT fiscal_years_workspace_id_id_key UNIQUE (workspace_id, id);
+
+
+--
+-- Name: fiscal_years fiscal_years_workspace_id_label_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.fiscal_years
+    ADD CONSTRAINT fiscal_years_workspace_id_label_key UNIQUE (workspace_id, label);
 
 
 --
@@ -843,6 +987,13 @@ CREATE INDEX idx_documents_workspace ON public.documents USING btree (workspace_
 
 
 --
+-- Name: idx_fiscal_years_workspace; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_fiscal_years_workspace ON public.fiscal_years USING btree (workspace_id, starts_on DESC);
+
+
+--
 -- Name: idx_journal_entries_author; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -899,6 +1050,13 @@ CREATE UNIQUE INDEX uq_users_email_lower ON public.users USING btree (lower(emai
 
 
 --
+-- Name: accounts trg_accounts_normal_balance_default; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_accounts_normal_balance_default BEFORE INSERT ON public.accounts FOR EACH ROW EXECUTE FUNCTION public.account_normal_balance_default();
+
+
+--
 -- Name: accounts trg_accounts_version; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -913,6 +1071,13 @@ CREATE TRIGGER trg_categorization_rules_version BEFORE UPDATE ON public.categori
 
 
 --
+-- Name: fiscal_years trg_fiscal_years_version; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_fiscal_years_version BEFORE UPDATE ON public.fiscal_years FOR EACH ROW EXECUTE FUNCTION public.guard_mutable_row();
+
+
+--
 -- Name: journal_entries trg_journal_entries_author_is_a_member; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -924,6 +1089,13 @@ CREATE TRIGGER trg_journal_entries_author_is_a_member BEFORE INSERT ON public.jo
 --
 
 CREATE TRIGGER trg_journal_entries_immutability BEFORE INSERT OR DELETE OR UPDATE ON public.journal_entries FOR EACH ROW EXECUTE FUNCTION public.guard_journal_entry_immutability();
+
+
+--
+-- Name: journal_entries trg_journal_entries_period_open; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_journal_entries_period_open BEFORE INSERT OR UPDATE ON public.journal_entries FOR EACH ROW EXECUTE FUNCTION public.guard_posting_period_is_open();
 
 
 --
@@ -1046,6 +1218,22 @@ ALTER TABLE ONLY public.documents
 
 ALTER TABLE ONLY public.documents
     ADD CONSTRAINT documents_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
+-- Name: fiscal_years fiscal_years_closed_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.fiscal_years
+    ADD CONSTRAINT fiscal_years_closed_by_user_id_fkey FOREIGN KEY (closed_by_user_id) REFERENCES public.users(id);
+
+
+--
+-- Name: fiscal_years fiscal_years_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.fiscal_years
+    ADD CONSTRAINT fiscal_years_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
 
 
 --
@@ -1223,6 +1411,19 @@ ALTER TABLE public.documents ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY documents_workspace_isolation ON public.documents USING ((workspace_id = public.app_current_workspace())) WITH CHECK ((workspace_id = public.app_current_workspace()));
+
+
+--
+-- Name: fiscal_years; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.fiscal_years ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: fiscal_years fiscal_years_workspace_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY fiscal_years_workspace_isolation ON public.fiscal_years USING ((workspace_id = public.app_current_workspace())) WITH CHECK ((workspace_id = public.app_current_workspace()));
 
 
 --
