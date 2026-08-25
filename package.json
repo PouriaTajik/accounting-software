@@ -1,19 +1,27 @@
 {
   "name": "accounting-software",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-first, open-source double-entry accounting for SMB to enterprise.",
+  "//license": "FSL-1.1-ALv2. Not an SPDX identifier, so npm's convention is the SEE LICENSE IN form.",
+  "license": "SEE LICENSE IN LICENSE",
+  "workspaces": [
+    "apps/desktop",
+    "packages/ui",
+    "packages/sync"
+  ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "db:up": "docker compose -f apps/server/docker-compose.yml up -d db",
+    "db:down": "docker compose -f apps/server/docker-compose.yml down",
+    "db:verify": "docker compose -f apps/server/docker-compose.yml exec -T db psql -U accounting -d accounting -v ON_ERROR_STOP=1 -f /db/verify_schema.sql",
+    "api:install": "pip install -e packages/ai && pip install -e packages/api[dev]",
+    "api:dev": "uvicorn accounting_api.main:app --reload --port 8000",
+    "api:test": "pytest packages/api"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/PouriaTajik/accounting-software.git"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "bugs": {
     "url": "https://github.com/PouriaTajik/accounting-software/issues"
   },
