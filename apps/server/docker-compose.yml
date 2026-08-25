@@ -39,7 +39,12 @@ services:
       dockerfile: apps/server/Dockerfile
     environment:
       ACCOUNTING_DEPLOYMENT_MODE: server
-      ACCOUNTING_DATABASE_URL: postgresql://accounting:accounting@db:5432/accounting
+      # accounting_app, NOT accounting. The owner of the tables is exempt from
+      # their row-level security policies, so connecting as `accounting` here
+      # would leave migration 0004's tenant isolation inert. The API checks
+      # this at startup and refuses to serve in server mode.
+      # Created by db/roles.sql; the password below is its dev-only default.
+      ACCOUNTING_DATABASE_URL: postgresql://accounting_app:changeme-dev-only@db:5432/accounting
       # Generated text-to-SQL runs as this role, not as the app role.
       # Create it with db/roles.sql, then uncomment:
       # ACCOUNTING_NL_QUERY_DATABASE_URL: postgresql://nl_query:CHANGEME@db:5432/accounting

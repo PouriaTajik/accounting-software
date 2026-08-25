@@ -67,6 +67,31 @@ $$;
 
 
 --
+-- Name: guard_entry_author_is_a_member(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_entry_author_is_a_member() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.created_by_user_id IS NOT NULL
+       AND NOT EXISTS (
+           SELECT 1 FROM workspace_members m
+            WHERE m.workspace_id = NEW.workspace_id
+              AND m.user_id = NEW.created_by_user_id
+       )
+    THEN
+        RAISE EXCEPTION
+            'journal_entries: user % is not a member of workspace %',
+            NEW.created_by_user_id, NEW.workspace_id
+            USING ERRCODE = 'foreign_key_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: guard_journal_entry_immutability(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -227,6 +252,48 @@ $$;
 
 
 --
+-- Name: guard_workspace_keeps_an_owner(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_workspace_keeps_an_owner() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    remaining integer;
+BEGIN
+    -- Only demotions and removals of an owner can strand a workspace.
+    IF TG_OP = 'UPDATE' AND (OLD.role <> 'owner' OR NEW.role = 'owner') THEN
+        RETURN NEW;
+    END IF;
+    IF TG_OP = 'DELETE' AND OLD.role <> 'owner' THEN
+        RETURN OLD;
+    END IF;
+
+    -- The workspace itself going away takes its memberships with it, which is
+    -- not stranding anyone.
+    IF NOT EXISTS (SELECT 1 FROM workspaces WHERE id = OLD.workspace_id) THEN
+        RETURN CASE TG_OP WHEN 'DELETE' THEN OLD ELSE NEW END;
+    END IF;
+
+    SELECT count(*) INTO remaining
+      FROM workspace_members m
+     WHERE m.workspace_id = OLD.workspace_id
+       AND m.role = 'owner'
+       AND m.user_id <> OLD.user_id;
+
+    IF remaining = 0 THEN
+        RAISE EXCEPTION
+            'workspace_members: workspace % would be left with no owner; '
+            'promote another member first.', OLD.workspace_id
+            USING ERRCODE = 'restrict_violation';
+    END IF;
+
+    RETURN CASE TG_OP WHEN 'DELETE' THEN OLD ELSE NEW END;
+END;
+$$;
+
+
+--
 -- Name: journal_line_currency_defaults(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -353,6 +420,8 @@ CREATE TABLE public.journal_entries (
     version integer DEFAULT 1 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by_user_id uuid,
+    posted_by_user_id uuid,
     CONSTRAINT journal_entries_reversal_is_sourced CHECK (((reverses_entry_id IS NULL) OR (source = 'reversal'::text))),
     CONSTRAINT journal_entries_reversal_not_self CHECK ((reverses_entry_id <> id)),
     CONSTRAINT journal_entries_source_check CHECK ((source = ANY (ARRAY['manual'::text, 'ocr_import'::text, 'csv_import'::text, 'ai_categorized'::text, 'reversal'::text])))
@@ -511,6 +580,22 @@ CREATE TABLE public.schema_migrations (
 
 
 --
+-- Name: users; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.users (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    email text NOT NULL,
+    display_name text,
+    is_active boolean DEFAULT true NOT NULL,
+    version integer DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT users_email_check CHECK ((length(TRIM(BOTH FROM email)) > 0))
+);
+
+
+--
 -- Name: workspace_ai_config; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -526,6 +611,21 @@ CREATE TABLE public.workspace_ai_config (
     CONSTRAINT workspace_ai_config_mode_check CHECK ((mode = ANY (ARRAY['cloud_openai'::text, 'cloud_anthropic'::text, 'cloud_azure_openai'::text, 'cloud_custom_endpoint'::text, 'local_ollama'::text]))),
     CONSTRAINT workspace_ai_config_model_check CHECK ((length(TRIM(BOTH FROM model)) > 0)),
     CONSTRAINT workspace_ai_config_offline_has_no_key CHECK (((mode <> 'local_ollama'::text) OR (api_key_encrypted IS NULL)))
+);
+
+
+--
+-- Name: workspace_members; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.workspace_members (
+    workspace_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    role text NOT NULL,
+    version integer DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT workspace_members_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'bookkeeper'::text, 'viewer'::text])))
 );
 
 
@@ -654,11 +754,27 @@ ALTER TABLE ONLY public.schema_migrations
 
 
 --
+-- Name: users users_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: workspace_ai_config workspace_ai_config_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.workspace_ai_config
     ADD CONSTRAINT workspace_ai_config_pkey PRIMARY KEY (workspace_id);
+
+
+--
+-- Name: workspace_members workspace_members_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspace_members
+    ADD CONSTRAINT workspace_members_pkey PRIMARY KEY (workspace_id, user_id);
 
 
 --
@@ -727,6 +843,13 @@ CREATE INDEX idx_documents_workspace ON public.documents USING btree (workspace_
 
 
 --
+-- Name: idx_journal_entries_author; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_journal_entries_author ON public.journal_entries USING btree (workspace_id, created_by_user_id);
+
+
+--
 -- Name: idx_journal_entries_drafts; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -755,10 +878,24 @@ CREATE INDEX idx_journal_lines_entry ON public.journal_lines USING btree (journa
 
 
 --
+-- Name: idx_workspace_members_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_workspace_members_user ON public.workspace_members USING btree (user_id);
+
+
+--
 -- Name: uq_journal_entries_one_reversal; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE UNIQUE INDEX uq_journal_entries_one_reversal ON public.journal_entries USING btree (reverses_entry_id) WHERE (reverses_entry_id IS NOT NULL);
+
+
+--
+-- Name: uq_users_email_lower; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_users_email_lower ON public.users USING btree (lower(email));
 
 
 --
@@ -773,6 +910,13 @@ CREATE TRIGGER trg_accounts_version BEFORE UPDATE ON public.accounts FOR EACH RO
 --
 
 CREATE TRIGGER trg_categorization_rules_version BEFORE UPDATE ON public.categorization_rules FOR EACH ROW EXECUTE FUNCTION public.guard_mutable_row();
+
+
+--
+-- Name: journal_entries trg_journal_entries_author_is_a_member; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_journal_entries_author_is_a_member BEFORE INSERT ON public.journal_entries FOR EACH ROW EXECUTE FUNCTION public.guard_entry_author_is_a_member();
 
 
 --
@@ -797,10 +941,31 @@ CREATE TRIGGER trg_journal_lines_immutability BEFORE INSERT OR DELETE OR UPDATE 
 
 
 --
+-- Name: users trg_users_version; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_users_version BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.guard_mutable_row();
+
+
+--
 -- Name: workspace_ai_config trg_workspace_ai_config_version; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER trg_workspace_ai_config_version BEFORE UPDATE ON public.workspace_ai_config FOR EACH ROW EXECUTE FUNCTION public.guard_mutable_row();
+
+
+--
+-- Name: workspace_members trg_workspace_members_keep_an_owner; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_workspace_members_keep_an_owner BEFORE DELETE OR UPDATE ON public.workspace_members FOR EACH ROW EXECUTE FUNCTION public.guard_workspace_keeps_an_owner();
+
+
+--
+-- Name: workspace_members trg_workspace_members_version; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_workspace_members_version BEFORE UPDATE ON public.workspace_members FOR EACH ROW EXECUTE FUNCTION public.guard_mutable_row();
 
 
 --
@@ -852,6 +1017,14 @@ ALTER TABLE ONLY public.categorization_rules
 
 
 --
+-- Name: devices devices_user_is_a_member; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.devices
+    ADD CONSTRAINT devices_user_is_a_member FOREIGN KEY (workspace_id, user_id) REFERENCES public.workspace_members(workspace_id, user_id);
+
+
+--
 -- Name: devices devices_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -876,11 +1049,27 @@ ALTER TABLE ONLY public.documents
 
 
 --
+-- Name: journal_entries journal_entries_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.journal_entries
+    ADD CONSTRAINT journal_entries_created_by_user_id_fkey FOREIGN KEY (created_by_user_id) REFERENCES public.users(id);
+
+
+--
 -- Name: journal_entries journal_entries_device_same_workspace; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.journal_entries
     ADD CONSTRAINT journal_entries_device_same_workspace FOREIGN KEY (workspace_id, created_by_device_id) REFERENCES public.devices(workspace_id, id);
+
+
+--
+-- Name: journal_entries journal_entries_posted_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.journal_entries
+    ADD CONSTRAINT journal_entries_posted_by_user_id_fkey FOREIGN KEY (posted_by_user_id) REFERENCES public.users(id);
 
 
 --
@@ -948,11 +1137,172 @@ ALTER TABLE ONLY public.workspace_ai_config
 
 
 --
+-- Name: workspace_members workspace_members_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspace_members
+    ADD CONSTRAINT workspace_members_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: workspace_members workspace_members_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspace_members
+    ADD CONSTRAINT workspace_members_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
 -- Name: workspaces workspaces_base_currency_is_known; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.workspaces
     ADD CONSTRAINT workspaces_base_currency_is_known FOREIGN KEY (base_currency) REFERENCES public.currencies(code);
+
+
+--
+-- Name: accounts; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.accounts ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: accounts accounts_workspace_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY accounts_workspace_isolation ON public.accounts USING ((workspace_id = public.app_current_workspace())) WITH CHECK ((workspace_id = public.app_current_workspace()));
+
+
+--
+-- Name: anomaly_flags; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.anomaly_flags ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: anomaly_flags anomaly_flags_workspace_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY anomaly_flags_workspace_isolation ON public.anomaly_flags USING ((workspace_id = public.app_current_workspace())) WITH CHECK ((workspace_id = public.app_current_workspace()));
+
+
+--
+-- Name: categorization_rules; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.categorization_rules ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: categorization_rules categorization_rules_workspace_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY categorization_rules_workspace_isolation ON public.categorization_rules USING ((workspace_id = public.app_current_workspace())) WITH CHECK ((workspace_id = public.app_current_workspace()));
+
+
+--
+-- Name: devices; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.devices ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: devices devices_workspace_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY devices_workspace_isolation ON public.devices USING ((workspace_id = public.app_current_workspace())) WITH CHECK ((workspace_id = public.app_current_workspace()));
+
+
+--
+-- Name: documents; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.documents ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: documents documents_workspace_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY documents_workspace_isolation ON public.documents USING ((workspace_id = public.app_current_workspace())) WITH CHECK ((workspace_id = public.app_current_workspace()));
+
+
+--
+-- Name: journal_entries; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.journal_entries ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: journal_entries journal_entries_workspace_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY journal_entries_workspace_isolation ON public.journal_entries USING ((workspace_id = public.app_current_workspace())) WITH CHECK ((workspace_id = public.app_current_workspace()));
+
+
+--
+-- Name: journal_lines; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.journal_lines ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: journal_lines journal_lines_workspace_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY journal_lines_workspace_isolation ON public.journal_lines USING ((workspace_id = public.app_current_workspace())) WITH CHECK ((workspace_id = public.app_current_workspace()));
+
+
+--
+-- Name: users; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: users users_visible_to_co_members; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY users_visible_to_co_members ON public.users FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM public.workspace_members m
+  WHERE ((m.user_id = users.id) AND (m.workspace_id = public.app_current_workspace())))));
+
+
+--
+-- Name: workspace_ai_config; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.workspace_ai_config ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: workspace_ai_config workspace_ai_config_workspace_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY workspace_ai_config_workspace_isolation ON public.workspace_ai_config USING ((workspace_id = public.app_current_workspace())) WITH CHECK ((workspace_id = public.app_current_workspace()));
+
+
+--
+-- Name: workspace_members; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.workspace_members ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: workspace_members workspace_members_workspace_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY workspace_members_workspace_isolation ON public.workspace_members USING ((workspace_id = public.app_current_workspace())) WITH CHECK ((workspace_id = public.app_current_workspace()));
+
+
+--
+-- Name: workspaces; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.workspaces ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: workspaces workspaces_workspace_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY workspaces_workspace_isolation ON public.workspaces USING ((id = public.app_current_workspace())) WITH CHECK ((id = public.app_current_workspace()));
 
 
 --

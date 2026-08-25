@@ -80,6 +80,10 @@ pass against PostgreSQL 16.
   ledger. Run after any change to `roles.sql` or the `ledger_query` views.
 - **`verify_currency.sql`** (22 checks) — toman stays a display unit, rial
   magnitudes fit, and the Level 0 gate holds.
+- **`verify_rls.sql`** (29 checks) — the application role is actually subject
+  to the tenant policies. Coverage is read from the catalog, so a migration
+  that adds a `workspace_id` column without a policy fails here rather than
+  leaking.
 
 Run `roles.sql` **once per database, not once per cluster.** The `nl_query`
 role is a cluster-level object, but every `GRANT`/`REVOKE` in that file applies
@@ -168,6 +172,75 @@ Callers do not carry any of this: a `BEFORE INSERT` trigger fills
 `base_currency`, `currency`, the original amounts and an identity rate from the
 workspace. An `INSERT` written before `0002` still works unchanged, which is
 why `verify_schema.sql` needed no edits.
+
+## Tenant isolation: two roles and a session variable
+
+Composite foreign keys make a cross-tenant *reference* structurally
+impossible. They do nothing about a query that simply *reads* the wrong tenant.
+Since `0004`, row-level security closes that: every policy compares
+`workspace_id` against `app_current_workspace()`, which reads the
+`app.workspace_id` set per transaction by `Database.workspace()`.
+
+Unset means **invisible, not unfiltered** — `app_current_workspace()` returns
+NULL, and `workspace_id = NULL` is NULL rather than true. A policy that fell
+back to "all rows" when unscoped would be worse than none, because it would
+look like one.
+
+**The trap, and why the roles are split.** A table's owner is exempt from its
+own policies. Connect the API as the owner and every policy stays in place and
+does nothing — no error, no log line. So:
+
+| Role | Used by | RLS |
+|---|---|---|
+| `accounting` | migrations, provisioning | exempt, by ownership |
+| `accounting_app` | the API, every request | **bound** — non-owner, no BYPASSRLS |
+| `nl_query` | generated text-to-SQL | reaches only `ledger_query` |
+
+That exemption is *wanted* for the owner: migrations legitimately touch every
+tenant's rows — `0002`'s currency backfill is exactly that — and under `FORCE
+ROW LEVEL SECURITY` those statements would match nothing and silently succeed.
+`FORCE` plus a `BYPASSRLS` grant would be equivalent and additionally need
+superuser at setup, which managed Postgres does not always give. So the risk is
+closed where it lives instead:
+
+- `roles.sql` creates `accounting_app` with DML grants, no DDL, no ownership.
+- `verify_rls.sql` asserts it is not a superuser, holds no `BYPASSRLS`, and
+  owns no tables.
+- `packages/api` checks `row_security_active()` at startup and **refuses to
+  serve in server mode** on a connection that can bypass RLS.
+
+**Creating a workspace cannot happen through the app connection** — there is no
+workspace to scope the session to yet. Provisioning and the desktop app's
+first-run setup do it as the owner.
+
+`SET LOCAL`, never plain `SET`. A session-level setting outlives the
+transaction and is still in place for the next borrower of that pooled
+connection, which under pgbouncer in transaction mode is a different request
+for a different tenant.
+
+## Identity
+
+`users` is global; `workspace_members` is the tenant-scoped join carrying the
+role (`owner` / `bookkeeper` / `viewer`). A person with books for two companies
+is one person, so `users` is the second documented exception to "workspace_id
+on every table", after `currencies`. It is scoped for reading by shared
+membership, so one tenant cannot enumerate a hosted install's users.
+
+**Authentication is not in here.** No password hashes, no OIDC subject, no
+sessions — that decision differs by deployment (the desktop app may have no
+login at all) and guessing would bake it into the ledger schema. `users` is
+identity storage; credentials get their own table when that is decided.
+
+`journal_entries` gained `created_by_user_id` and `posted_by_user_id` now
+rather than later, for the same reason as the currency columns: the table is
+immutable once posted, so a column added afterwards can never be backfilled.
+Both reference `users` plainly rather than `workspace_members` — revoking
+someone's membership must not rewrite or block who authored past entries. The
+workspace match is enforced by trigger at INSERT, which is when it is a
+question.
+
+A workspace cannot be left with no owner: that is cross-row, so it is a trigger
+rather than a CHECK.
 
 ## Break-glass: deleting a workspace
 
@@ -284,23 +357,13 @@ listed rather than buried:
 - **Currency: Level 0 behaviour, Level 1 columns, toman as a display unit.**
   See the currency section above.
 
+- **Users and membership, and row-level security.** Built in `0003` and
+  `0004` — see the two sections above. The owner-bypass trap was handled with a
+  role split and a startup check rather than `FORCE ROW LEVEL SECURITY`, for
+  the reason given in `0004`'s header.
+
 **Decided — not yet written:**
 
-- **`users` + roles.** `devices.user_id` is currently an unconstrained, nullable
-  uuid pointing at nothing. Approved to add, which also unblocks the phase-3
-  sync spike from baking in an identity-free model. Lands **before** RLS: the
-  policies may want to reference a user, not only a workspace.
-- **Row-level security.** Approved. Composite FKs stop cross-tenant
-  *references*; they do nothing about a buggy query *reading* the wrong tenant,
-  which is the highest-severity bug class in a multi-tenant accounting product.
-  Three traps to handle when it lands: the table owner **bypasses RLS by
-  default** (needs `FORCE ROW LEVEL SECURITY` plus an owner/app role split —
-  otherwise the policies silently do nothing, exactly like the ineffective
-  `REVOKE ... FROM public` this file used to claim); `SET LOCAL` never plain
-  `SET`, or the scope leaks across pooled connections; and a `verify_rls.sql`
-  asserting both, so the owner-bypass trap fails a test rather than becoming an
-  incident. `Database.workspace()` in `packages/api` already sets
-  `app.workspace_id` transaction-locally, so the connection side is ready.
 - **Fiscal periods and closing.** Approved. There is no period concept in the
   schema at all, and a correct P&L needs period boundaries and a notion of a
   locked period. It interacts with immutability — closing entries are entries,
