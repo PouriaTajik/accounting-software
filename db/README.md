@@ -83,7 +83,11 @@ pass against PostgreSQL 16.
 - **`verify_rls.sql`** (29 checks) — the application role is actually subject
   to the tenant policies. Coverage is read from the catalog, so a migration
   that adds a `workspace_id` column without a policy fails here rather than
-  leaking.
+  leaking. It has already caught one: `fiscal_years`, while `0005` was being
+  written.
+- **`verify_periods.sql`** (24 checks) — a closed year stops accepting
+  postings, years cannot overlap, and contra accounts report on the right
+  side.
 
 Run `roles.sql` **once per database, not once per cluster.** The `nl_query`
 role is a cluster-level object, but every `GRANT`/`REVOKE` in that file applies
@@ -242,6 +246,55 @@ question.
 A workspace cannot be left with no owner: that is cross-row, so it is a trigger
 rather than a CHECK.
 
+## Fiscal periods and closing
+
+Immutability stops a posted row *changing*. It does nothing about a **new**
+entry backdated into a year already reported on — a different hole, and the one
+`0005` closes.
+
+**Calendars.** Iranian businesses keep books on the Solar Hijri year (1
+Farvardin – 29/30 Esfand, roughly 21 March – 20 March). That is not a different
+kind of date, only a different way of naming one — the same insight as toman.
+So a fiscal year is an ordinary Gregorian date range plus a text label: a
+workspace on the Iranian calendar gets `'1404'` running `2025-03-21` to
+`2026-03-20`. `workspaces.fiscal_calendar` records which calendar the users
+think in, so the UI renders and defaults correctly. No calendar arithmetic in
+the database, no second date type, and `entry_date` stays directly comparable.
+
+Two locking mechanisms, because they answer different questions:
+
+| | Granularity | For |
+|---|---|---|
+| `fiscal_years.closed_at` | a year | the annual close, with closing entries |
+| `workspaces.books_locked_through` | any date | routine "lock last month", no row per month |
+
+Both are enforced at the **draft → posted transition only**. A draft may be
+dated anywhere: it is not in the books yet, and refusing to let someone type
+one would be the opposite of least-steps.
+
+Closing entries are dated *inside* the year they close, so they must be posted
+**before** the year is marked closed. That ordering is why closing is a flag
+set afterwards rather than an operation that posts and locks in one step.
+Reopening is allowed — `closed_at` back to NULL — which makes closing a state
+rather than a one-way door. Auditing *who reopened* waits on the activity-log
+decision.
+
+Years cannot overlap, enforced by an `EXCLUDE` constraint rather than a trigger:
+a trigger reading the table cannot see a concurrent uncommitted insert, so two
+overlapping years could be created at once and both succeed. The real collision
+is a Gregorian `2026` added alongside a Nowruz `1404` — they share nine months,
+and "which year is this entry in" would have two answers. This needs
+`btree_gist`, a *trusted* extension since PG13, so the database owner installs
+it without superuser — the same bar that ruled out `uuid-ossp`.
+
+**What reports need.** `accounts.type` alone cannot express a contra account:
+accumulated depreciation is an asset carrying a *credit* balance, and a balance
+sheet built on `type` reports it with the wrong sign. So `normal_balance` is its
+own fact, defaulted from `type` by trigger and overridden deliberately.
+`cash_flow_category` gives the indirect cash flow statement somewhere to
+classify a movement. Closing entries carry `source = 'period_close'` so a P&L
+can exclude them — otherwise the year reads as nil.
+
 ## Break-glass: deleting a workspace
 
 `ON DELETE CASCADE` from `workspaces` hits the posted-entry delete guard, so
@@ -356,22 +409,15 @@ listed rather than buried:
   anyway. See the Migrations section above.
 - **Currency: Level 0 behaviour, Level 1 columns, toman as a display unit.**
   See the currency section above.
-
 - **Users and membership, and row-level security.** Built in `0003` and
   `0004` — see the two sections above. The owner-bypass trap was handled with a
   role split and a startup check rather than `FORCE ROW LEVEL SECURITY`, for
   the reason given in `0004`'s header.
+- **Fiscal periods and closing: Gregorian ranges with a calendar label.** Built
+  in `0005` — see the section above.
 
 **Decided — not yet written:**
 
-- **Fiscal periods and closing.** Approved. There is no period concept in the
-  schema at all, and a correct P&L needs period boundaries and a notion of a
-  locked period. It interacts with immutability — closing entries are entries,
-  and locking a period is a posting-time check — so it touches trigger logic
-  that `verify_schema.sql` covers. Reports are the acceptance test for
-  `accounts.type`: the five values cannot currently express a contra account
-  (accumulated depreciation is asset-typed with a credit balance), and cash-flow
-  classification has nowhere to live.
 - **Reconciliations.** Needed for the MVP "mark a batch of entries reconciled
   against a statement" flow — somewhere to record the batch and the statement
   it was matched against.
