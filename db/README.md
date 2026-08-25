@@ -8,15 +8,48 @@ Postgres. There is no second schema.
 
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/verify_schema.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -v nl_query_password="'<secret>'" -f db/roles.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/verify_schema.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/verify_roles.sql
 ```
 
-`verify_schema.sql` runs entirely inside a transaction it rolls back. It
-asserts that each ledger invariant is actually enforced by the database, and
-exits non-zero naming the first check that fails. Run it after any schema
-change — it is the regression suite for the parts of correctness that live in
-Postgres rather than in Python.
+Roles come before the verification scripts: `verify_roles.sql` asserts against
+the role `roles.sql` creates.
+
+Run `roles.sql` **once per database, not once per cluster.** The `nl_query`
+role is a cluster-level object, but every `GRANT`/`REVOKE` in that file applies
+only to the database it is run against — so a second database in the same
+cluster starts out with `nl_query` able to read its base tables.
+`verify_roles.sql` fails loudly on a database that was missed, which is most of
+why it exists.
+
+`schema.sql` is **not** re-runnable — it is a bootstrap file for a fresh
+database, and applying it twice fails on the first `CREATE TABLE`. That is
+deliberate: `CREATE TABLE IF NOT EXISTS` would silently skip a table whose
+definition had drifted, which on a ledger is worse than an error. Migrations
+are still an open decision (see below). `roles.sql` *is* re-runnable.
+
+Both verification scripts run entirely inside a transaction they roll back, so
+they are safe against a live database, and both exit non-zero naming the first
+check that fails:
+
+- **`verify_schema.sql`** asserts each ledger invariant is actually enforced by
+  the database. Run it after any schema change — it is the regression suite for
+  the parts of correctness that live in Postgres rather than in Python.
+- **`verify_roles.sql`** asserts the `nl_query` role cannot reach the ledger.
+  Run it after any change to `roles.sql` or to the `ledger_query` views.
+
+Both currently pass against PostgreSQL 16.
+
+### Without Docker
+
+If a local Postgres is already running, skip Compose entirely:
+
+```bash
+createdb accounting
+DATABASE_URL="postgresql:///accounting" npm run db:apply
+DATABASE_URL="postgresql:///accounting" npm run db:verify:local
+```
 
 ## What is enforced in the database, and why
 
@@ -73,12 +106,41 @@ independently of how well the prompt is written:
    `SET LOCAL app.workspace_id`. Tenant scoping does not depend on the model
    remembering a `WHERE` clause, and an unscoped session sees *nothing* rather
    than everything.
-2. **The role is `default_transaction_read_only`** with a statement timeout and
-   no privileges on `public`. A generated `DELETE` cannot commit even if it is
-   generated.
+2. **The role holds no privileges on `public` at all** — not on the base tables,
+   and not even `USAGE` on the schema. It reads the `ledger_query` views by
+   ownership chaining and has no `INSERT`/`UPDATE`/`DELETE` grant anywhere, so
+   there is no write path to reach. This is the control that holds.
 
 Assume a scanned receipt will eventually contain text attempting to steer the
 model. The control is the role's capability, not the instructions.
+
+**A correction worth being explicit about.** Earlier drafts of this file and of
+`roles.sql` claimed the role's `default_transaction_read_only` setting meant a
+generated `DELETE` "cannot commit". That is false, and testing against PG16
+confirmed it: `default_transaction_read_only`, `statement_timeout`,
+`idle_in_transaction_session_timeout` and `search_path` are all `USERSET`
+parameters, so `nl_query` can override any of them with a plain `SET` —
+
+```
+nl_query=> SET default_transaction_read_only = off;   -- succeeds
+nl_query=> SET statement_timeout = 0;                 -- succeeds
+```
+
+Postgres offers no way to forbid that for a non-superuser. Those settings are
+kept because they make the *accidental* case fail fast, but they are defaults,
+not boundaries. Only the privilege grant in point 2 is a boundary, which is why
+`verify_roles.sql` tests that layer and not those settings.
+
+The GUC defaults apply at login, which `SET ROLE` does not trigger, so
+`verify_roles.sql` can only assert they are *configured*. To watch them take
+effect, log in as the role directly:
+
+```bash
+psql "postgresql://nl_query:<secret>@localhost/accounting" \
+     -c "SHOW default_transaction_read_only;"   # -> on
+psql "postgresql://nl_query:<secret>@localhost/accounting" \
+     -c "SELECT * FROM public.journal_lines;"   # -> permission denied for schema public
+```
 
 ---
 
