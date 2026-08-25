@@ -65,7 +65,7 @@ def test_stubs_return_501_not_empty_success(client: TestClient) -> None:
     body would look like a working, empty ledger.
     """
     response = client.get(
-        f"{API_PREFIX}/accounts",
+        f"{API_PREFIX}/documents/00000000-0000-0000-0000-000000000001",
         headers={"X-Workspace-Id": "00000000-0000-0000-0000-000000000001"},
     )
     assert response.status_code == 501

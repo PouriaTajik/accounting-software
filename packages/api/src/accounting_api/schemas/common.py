@@ -11,13 +11,16 @@ T = TypeVar("T")
 
 #: Amounts are `Decimal`, never `float`, and serialize as strings.
 #:
-#: `journal_lines.debit/credit` are `numeric(18,2)`; binding them to a float
-#: anywhere in the stack reintroduces exactly the representation error the
-#: numeric type exists to avoid. JSON has one number type and it is a double,
-#: so the wire format is a string.
+#: `journal_lines.debit/credit` are `numeric(24,6)` -- widened from the
+#: original `numeric(18,2)` (migration 0002) because an ordinary SMB invoice
+#: in rial runs to ten figures ahead of the decimal, plus headroom in scale
+#: for FX conversion. Binding an amount to a float anywhere in the stack
+#: reintroduces exactly the representation error the numeric type exists to
+#: avoid. JSON has one number type and it is a double, so the wire format is
+#: a string.
 Money = Annotated[
     Decimal,
-    Field(max_digits=18, decimal_places=2),
+    Field(max_digits=24, decimal_places=6),
 ]
 
 
