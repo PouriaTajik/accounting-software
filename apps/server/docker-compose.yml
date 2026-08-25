@@ -1,11 +1,16 @@
 # Self-hosted deployment, and the fastest way to get a real Postgres to run
-# db/schema.sql and db/verify_schema.sql against.
+# the migrations and verification scripts against.
 #
 #   docker compose -f apps/server/docker-compose.yml up --build
 #
-# Postgres applies everything in /docker-entrypoint-initdb.d on first boot of
-# an empty volume, in filename order -- so the schema lands before the API
-# starts taking requests.
+# The database starts EMPTY on purpose. Nothing is mounted into
+# /docker-entrypoint-initdb.d: the migration runner owns schema creation, and
+# a schema applied at first boot would be invisible to it -- the runner would
+# find no schema_migrations table, try to apply 0001 over existing objects,
+# and fail. One thing creates the schema, and it is:
+#
+#   DATABASE_URL=postgresql://accounting:accounting@localhost:5432/accounting \
+#     npm run db:apply
 
 services:
   db:
@@ -18,10 +23,9 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      # Applied automatically on first boot of an empty volume.
-      - ../../db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-      # The whole db/ directory, so verify_schema.sql and roles.sql can be run
-      # on demand. Mounted outside initdb.d so they do NOT run at boot.
+      # The whole db/ directory, so the migrations, roles.sql and the verify
+      # scripts can be run on demand from inside the container. Deliberately
+      # NOT mounted into /docker-entrypoint-initdb.d -- see the note above.
       - ../../db:/db:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U accounting -d accounting"]
