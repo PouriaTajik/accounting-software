@@ -2,7 +2,7 @@
   "name": "accounting-software",
   "version": "0.1.0",
   "private": true,
-  "description": "AI-first, open-source double-entry accounting for SMB to enterprise.",
+  "description": "AI-first, source-available double-entry accounting for SMB to enterprise.",
   "//license": "FSL-1.1-ALv2. Not an SPDX identifier, so npm's convention is the SEE LICENSE IN form.",
   "license": "SEE LICENSE IN LICENSE",
   "workspaces": [
@@ -13,7 +13,12 @@
   "scripts": {
     "db:up": "docker compose -f apps/server/docker-compose.yml up -d db",
     "db:down": "docker compose -f apps/server/docker-compose.yml down",
-    "db:verify": "docker compose -f apps/server/docker-compose.yml exec -T db psql -U accounting -d accounting -v ON_ERROR_STOP=1 -f /db/verify_schema.sql",
+    "//db:roles": "Compose applies schema.sql on first boot but not roles.sql, which needs a password. This creates the nl_query role with a dev-only secret so db:verify can exercise it.",
+    "db:roles": "docker compose -f apps/server/docker-compose.yml exec -T db psql -U accounting -d accounting -v ON_ERROR_STOP=1 -v nl_query_password=\"'changeme-dev-only'\" -f /db/roles.sql",
+    "db:verify": "npm run db:roles && docker compose -f apps/server/docker-compose.yml exec -T db psql -U accounting -d accounting -v ON_ERROR_STOP=1 -f /db/verify_schema.sql && docker compose -f apps/server/docker-compose.yml exec -T db psql -U accounting -d accounting -v ON_ERROR_STOP=1 -f /db/verify_roles.sql",
+    "//db:local": "Non-Docker path against any running Postgres. Set DATABASE_URL first.",
+    "db:apply": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f db/schema.sql && psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -v nl_query_password=\"'${NL_QUERY_PASSWORD:-changeme-dev-only}'\" -f db/roles.sql",
+    "db:verify:local": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f db/verify_schema.sql && psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f db/verify_roles.sql",
     "api:install": "pip install -e packages/ai && pip install -e packages/api[dev]",
     "api:dev": "uvicorn accounting_api.main:app --reload --port 8000",
     "api:test": "pytest packages/api"

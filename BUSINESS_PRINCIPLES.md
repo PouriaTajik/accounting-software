@@ -8,8 +8,9 @@ workspace-based multi-tenancy are business-accounting concepts; a personal
 finance tool wouldn't need any of them. The user base has two tiers, mirroring
 n8n's own model:
 
-- **Self-serve / open-source**: indie businesses and SMBs, self-hosting or
-  using the software free.
+- **Self-serve / source-available**: indie businesses and SMBs, self-hosting
+  or using the software free. (Source-available under FSL, not OSI open
+  source — see README.md.)
 - **Paid tier**: enterprises paying for customization and/or managed hosting.
 
 ## No bank feeds — manual entry is the primary data-entry path
