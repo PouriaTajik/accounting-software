@@ -1,0 +1,88 @@
+/**
+ * Design tokens.
+ *
+ * Radius philosophy: your sweet spot is between "playful" (fully rounded,
+ * pill-shaped — think Duolingo) and "enterprise-standard" (sharp, 2-4px —
+ * think older SAP/Sage UIs). Landing on a 8-10px base radius reads as
+ * modern and approachable without softening financial data into a toy.
+ *
+ * Language philosophy: <html lang> and <html dir> are set once at the app
+ * root based on the active locale (en -> ltr, fa -> rtl) and never
+ * inferred per-component. Every spacing/alignment utility used in
+ * components must be a logical property (ms-/me-/ps-/pe-, not left-/right-)
+ * so RTL is automatic rather than patched in per-screen later.
+ */
+
+:root {
+  /* ---- Radius: moderate, not pill-shaped ---- */
+  --radius: 0.625rem;                          /* 10px base */
+  --radius-sm: calc(var(--radius) - 4px);      /* 6px  — inputs, small badges */
+  --radius-md: calc(var(--radius) - 2px);      /* 8px  — buttons, chips */
+  --radius-lg: var(--radius);                  /* 10px — cards, dialogs */
+  --radius-xl: calc(var(--radius) + 6px);      /* 16px — hero/marketing surfaces only */
+
+  /* ---- Typography ---- */
+  --font-sans-ltr: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-sans-rtl: "Vazirmatn", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --font-tabular: "Inter", ui-sans-serif, sans-serif; /* tabular-nums for ledger figures */
+
+  /* ---- Color: confident-but-calm primary, warm accent instead of harsh
+     red for "needs attention" states, desaturated neutrals so dense
+     transaction tables stay readable at a glance ---- */
+  --background: 0 0% 100%;
+  --foreground: 240 10% 12%;
+
+  --primary: 243 75% 59%;              /* indigo — distinct from both navy-corporate and startup-purple */
+  --primary-foreground: 0 0% 100%;
+
+  --accent: 38 92% 55%;                /* warm amber — AI-suggested badges, highlights */
+  --accent-foreground: 240 10% 12%;
+
+  --success: 152 60% 38%;              /* reconciled / posted */
+  --warning: 38 92% 50%;               /* needs review */
+  --destructive: 4 78% 58%;            /* actual errors only, kept rare */
+  --destructive-foreground: 0 0% 100%;
+
+  --muted: 240 5% 96%;
+  --muted-foreground: 240 4% 46%;
+
+  --border: 240 6% 90%;
+  --input: 240 6% 90%;
+  --ring: 243 75% 59%;
+
+  --card: 0 0% 100%;
+  --card-foreground: 240 10% 12%;
+}
+
+.dark {
+  --background: 240 10% 8%;
+  --foreground: 0 0% 96%;
+  --primary: 243 80% 68%;
+  --primary-foreground: 240 10% 8%;
+  --accent: 38 92% 60%;
+  --accent-foreground: 240 10% 8%;
+  --success: 152 55% 48%;
+  --warning: 38 92% 58%;
+  --destructive: 4 75% 62%;
+  --muted: 240 6% 16%;
+  --muted-foreground: 240 5% 65%;
+  --border: 240 6% 20%;
+  --input: 240 6% 20%;
+  --ring: 243 80% 68%;
+  --card: 240 10% 11%;
+  --card-foreground: 0 0% 96%;
+}
+
+/* ---- Language-driven font, set from <html lang="en|fa">, not per-component ---- */
+html[lang="en"] body { font-family: var(--font-sans-ltr); }
+html[lang="fa"] body { font-family: var(--font-sans-rtl); }
+
+/* Numbers stay in the same script/direction regardless of surrounding text
+   direction — critical for a ledger. Apply to every amount/date cell. */
+.tabular-figure {
+  font-family: var(--font-tabular);
+  font-variant-numeric: tabular-nums;
+  direction: ltr;
+  unicode-bidi: isolate;
+}
