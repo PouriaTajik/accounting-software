@@ -129,6 +129,16 @@ BEGIN
         (SELECT version FROM journal_entries WHERE id = draft) = v_version + 1,
         'editing a draft bumps its version automatically');
 
+    -- workspaces carried a `version` column since 0001 with no trigger to
+    -- bump it until 0006 -- an UPDATE against a stale version matched
+    -- anyway, so two concurrent writers could each believe they held the
+    -- current version and neither would see a 409.
+    SELECT version INTO v_version FROM workspaces WHERE id = ws;
+    UPDATE workspaces SET name = 'Verify Co Renamed' WHERE id = ws;
+    PERFORM pg_temp.assert(
+        (SELECT version FROM workspaces WHERE id = ws) = v_version + 1,
+        'editing a workspace bumps its version automatically');
+
     PERFORM pg_temp.assert_rejects(format(
         $s$UPDATE journal_entries SET workspace_id = '%s' WHERE id = '%s'$s$, other_ws, draft),
         'moving a draft entry to another workspace');

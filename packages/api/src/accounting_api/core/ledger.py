@@ -188,10 +188,13 @@ async def update_draft_entry(
     if unknown:
         raise ValueError(f"not updatable: {', '.join(sorted(unknown))}")
 
-    settable = {k: v for k, v in fields.items() if v is not None}
-    if settable:
-        assignments = ", ".join(f"{column} = ${i}" for i, column in enumerate(settable, start=3))
-        params = list(settable.values())
+    # `fields` is expected to already be scoped to what the caller actually
+    # sent (e.g. via `model_dump(exclude_unset=True)`) -- unlike a plain
+    # None-filter, this lets a caller clear `memo` by sending it as `null`,
+    # rather than that being indistinguishable from omitting it.
+    if fields:
+        assignments = ", ".join(f"{column} = ${i}" for i, column in enumerate(fields, start=3))
+        params = list(fields.values())
     else:
         # Still a real UPDATE even with nothing of its own to change, so the
         # version-bumping trigger fires uniformly -- a lines-only edit must be

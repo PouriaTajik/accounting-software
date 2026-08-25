@@ -4,24 +4,42 @@ from uuid import UUID
 
 from fastapi import APIRouter
 
-from ..deps import Db, not_implemented
+from ..core import workspaces as workspaces_core
+from ..deps import Db
+from ..schemas.workspaces import Workspace, WorkspaceCreate, WorkspaceUpdate
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
 
-@router.post("", status_code=201)
-async def create_workspace(payload: dict, db: Db):
-    """Create a workspace and seed a default chart of accounts."""
-    not_implemented("Creating a workspace")
+@router.post("", status_code=201, response_model=Workspace)
+async def create_workspace(payload: WorkspaceCreate, db: Db):
+    """Create a workspace.
+
+    Runs on a dedicated owner-role connection (`Database.provision()`), not
+    the ordinary per-request `WorkspaceId` scoping every other route uses --
+    there is no workspace yet to scope a session to. See db/README.md.
+    """
+    async with db.provision() as connection:
+        return await workspaces_core.create_workspace(
+            connection,
+            name=payload.name,
+            base_currency=payload.base_currency,
+            fiscal_calendar=payload.fiscal_calendar,
+        )
 
 
-@router.get("/{workspace_id}")
+@router.get("/{workspace_id}", response_model=Workspace)
 async def get_workspace(workspace_id: UUID, db: Db):
-    not_implemented("Reading a workspace")
+    async with db.workspace(workspace_id) as connection:
+        return await workspaces_core.get_workspace(connection, workspace_id)
 
 
-@router.patch("/{workspace_id}")
-async def update_workspace(workspace_id: UUID, payload: dict, db: Db):
+@router.patch("/{workspace_id}", response_model=Workspace)
+async def update_workspace(workspace_id: UUID, payload: WorkspaceUpdate, db: Db):
     """Optimistic-concurrency update. Body must carry the `version` last read;
     a mismatch is a 409 carrying both versions, never a silent overwrite."""
-    not_implemented("Updating a workspace")
+    fields = payload.model_dump(exclude={"version"}, exclude_unset=True)
+    async with db.workspace(workspace_id) as connection:
+        return await workspaces_core.update_workspace(
+            connection, workspace_id, expected_version=payload.version, **fields
+        )

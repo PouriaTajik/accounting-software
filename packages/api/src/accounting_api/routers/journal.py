@@ -68,15 +68,11 @@ async def update_draft_entry(
     entry_id: UUID, payload: JournalEntryUpdate, workspace_id: WorkspaceId, db: Db
 ):
     """Drafts only. Editing a posted entry returns 409 posted_entry_immutable."""
+    fields = payload.model_dump(exclude={"version", "lines"}, exclude_unset=True)
     lines = None if payload.lines is None else [line.model_dump() for line in payload.lines]
     async with db.workspace(workspace_id) as connection:
         return await ledger.update_draft_entry(
-            connection,
-            entry_id,
-            expected_version=payload.version,
-            entry_date=payload.entry_date,
-            memo=payload.memo,
-            lines=lines,
+            connection, entry_id, expected_version=payload.version, lines=lines, **fields
         )
 
 

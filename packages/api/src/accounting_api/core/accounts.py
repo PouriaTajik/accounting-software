@@ -83,16 +83,22 @@ async def update_account(
     expected_version: int,
     **fields: Any,
 ) -> dict[str, Any]:
-    """Edit an account, or raise `VersionConflict` carrying the current row."""
+    """Edit an account, or raise `VersionConflict` carrying the current row.
+
+    `fields` is expected to already be scoped to what the caller actually
+    sent (e.g. via `model_dump(exclude_unset=True)`) -- unlike a plain
+    None-filter, this lets a caller clear `parent_account_id` or
+    `cash_flow_category` by sending it as `null`, rather than that being
+    indistinguishable from omitting it.
+    """
     unknown = set(fields) - _UPDATABLE_COLUMNS
     if unknown:
         raise ValueError(f"not updatable: {', '.join(sorted(unknown))}")
 
-    settable = {k: v for k, v in fields.items() if v is not None}
-    if not settable:
+    if not fields:
         return await _get_or_raise(connection, account_id)
 
-    assignments = ", ".join(f"{column} = ${i}" for i, column in enumerate(settable, start=3))
+    assignments = ", ".join(f"{column} = ${i}" for i, column in enumerate(fields, start=3))
     row = await connection.fetchrow(
         f"""
         UPDATE accounts
@@ -102,7 +108,7 @@ async def update_account(
         """,
         account_id,
         expected_version,
-        *settable.values(),
+        *fields.values(),
     )
     if row is not None:
         return dict(row)
