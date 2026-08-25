@@ -11,7 +11,7 @@ maintained branches.
 
 from abc import ABC
 from enum import Enum
-from typing import Optional
+from typing import ClassVar
 
 import litellm
 from pydantic import BaseModel
@@ -28,16 +28,16 @@ class ProviderMode(str, Enum):
 class ProviderConfig(BaseModel):
     mode: ProviderMode
     model: str
-    api_key: Optional[str] = None       # required for cloud modes; a client-supplied key
-    api_base: Optional[str] = None      # custom endpoint URL, or local Ollama host
-    organization: Optional[str] = None  # OpenAI org id, if applicable
+    api_key: str | None = None       # required for cloud modes; a client-supplied key
+    api_base: str | None = None      # custom endpoint URL, or local Ollama host
+    organization: str | None = None  # OpenAI org id, if applicable
 
 
 class AIRequest(BaseModel):
     messages: list[dict]
     temperature: float = 0.2
     max_tokens: int = 1024
-    response_format: Optional[dict] = None   # e.g. {"type": "json_object"} for structured extraction
+    response_format: dict | None = None   # e.g. {"type": "json_object"} for structured extraction
 
 
 class AIResponse(BaseModel):
@@ -55,7 +55,7 @@ class AIProvider:
     can swap models (or go offline) without a redeploy.
     """
 
-    _MODEL_PREFIX = {
+    _MODEL_PREFIX: ClassVar[dict[ProviderMode, str]] = {
         ProviderMode.CLOUD_OPENAI: "openai/{model}",
         ProviderMode.CLOUD_ANTHROPIC: "anthropic/{model}",
         ProviderMode.CLOUD_AZURE_OPENAI: "azure/{model}",
@@ -105,7 +105,7 @@ def load_provider_for_workspace(workspace_ai_config_row: dict) -> AIProvider:
     return AIProvider(config)
 
 
-class UseCase(ABC):
+class UseCase(ABC):  # noqa: B024 -- intentionally a marker, not an interface
     """
     Marker base for the four planned AI use cases. Each concrete use case
     (OCR field extraction, categorization fallback, anomaly explanation,
@@ -129,4 +129,3 @@ class UseCase(ABC):
     fill in. Any use case implementation that surfaces a full form
     regardless of confidence is not meeting this principle.
     """
-    pass

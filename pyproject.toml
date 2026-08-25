@@ -1,0 +1,17 @@
+# Root tooling config. The Python packages themselves are in packages/ai and
+# packages/api, each with its own pyproject.toml; this file exists so lint and
+# test settings are pinned in one place rather than drifting per package.
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["packages/api/src", "packages/ai/src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "PIE"]
+ignore = [
+    # `str, Enum` is deliberate: it keeps these values JSON-serializable and
+    # directly comparable to the CHECK-constrained text columns in
+    # db/schema.sql, which is what they mirror.
+    "UP042",
+]
