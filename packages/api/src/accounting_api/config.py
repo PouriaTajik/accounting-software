@@ -29,8 +29,13 @@ class Settings(BaseSettings):
 
     deployment_mode: DeploymentMode = DeploymentMode.LOCAL
 
-    #: Read/write connection used by every normal request.
-    database_url: str = "postgresql://postgres:postgres@localhost:5432/accounting"
+    #: Read/write connection used by every normal request. Must authenticate as
+    #: `accounting_app` from db/roles.sql, NOT as the role that owns the tables
+    #: or ran the migrations: a table's owner is exempt from its own row-level
+    #: security policies, so connecting as the owner leaves migration 0004's
+    #: tenant isolation in place and inert. Checked at startup, and fatal in
+    #: server mode.
+    database_url: str = "postgresql://accounting_app:accounting@localhost:5432/accounting"
 
     #: Separate connection for generated text-to-SQL, authenticating as the
     #: `nl_query` role from db/roles.sql: read-only, statement-timed-out, and

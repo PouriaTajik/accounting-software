@@ -1,20 +1,89 @@
 # Database
 
-`schema.sql` is the canonical schema for both deployment targets — the
-embedded Postgres inside the desktop app and hosted/on-prem multi-tenant
-Postgres. There is no second schema.
+One schema serves both deployment targets — the embedded Postgres inside the
+desktop app and hosted/on-prem multi-tenant Postgres. There is no second
+schema.
 
-## Apply order
+| File | What it is |
+|---|---|
+| `migrations/NNNN_*.sql` | **The source of truth.** Hand-written, applied in order, never edited once applied. |
+| `schema.sql` | **Generated.** A `pg_dump` snapshot of the migrated schema, for reading and diffing. Nothing applies it. |
+| `roles.sql` | The read-only role that generated text-to-SQL runs as. Needs a password, so it is not a migration. |
+| `verify_*.sql` | Assertion suites. Each rolls back; each exits non-zero naming the first failure. |
+
+## Getting a database up
 
 ```bash
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -v nl_query_password="'<secret>'" -f db/roles.sql
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/verify_schema.sql
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/verify_roles.sql
+export DATABASE_URL="postgresql://accounting:accounting@localhost:5432/accounting"
+
+npm run db:apply     # migrations, then roles
+npm run db:verify    # all three assertion suites
 ```
 
-Roles come before the verification scripts: `verify_roles.sql` asserts against
-the role `roles.sql` creates.
+`db:apply` is `db:migrate` followed by `db:roles`. Roles come after because
+`verify_roles.sql` asserts against the role `roles.sql` creates.
+
+Nothing creates the schema except the migration runner — Compose deliberately
+mounts nothing into `/docker-entrypoint-initdb.d`. A schema applied at first
+boot would be invisible to the runner, which would then try to apply `0001`
+over existing objects and fail.
+
+## Migrations
+
+```bash
+npm run db:migrate        # apply everything pending
+npm run db:migrate:dry    # show what would be applied
+npm run db:snapshot       # regenerate db/schema.sql afterwards, and commit it
+```
+
+The runner lives in `packages/api/src/accounting_api/migrations.py`. Its design
+is driven by the desktop target, which is the hard case: migrations run on user
+machines, offline, possibly skipping many versions, with nobody around to fix a
+half-applied schema.
+
+- **Forward-only.** No down-migrations. You cannot un-ship a version a user has
+  already run, so a rollback path is a fiction that invites careless
+  migrations. Fix a bad migration by writing the next one.
+- **One transaction each.** Postgres has transactional DDL, so a migration
+  lands completely or not at all. A migration needing `CREATE INDEX
+  CONCURRENTLY` opts out with a `-- migrate:no-transaction` marker and gives up
+  that guarantee knowingly.
+- **Fail closed.** Applied migrations are checksummed, so editing one is
+  refused; so is a gap in the numbering, and so is a database carrying a
+  version this build does not ship (which means the app was downgraded).
+- **Serialized by advisory lock**, so two instances starting at once cannot
+  both apply the same migration.
+
+### Adding one
+
+1. `db/migrations/000N_short_name.sql` — next number, no gaps.
+2. `npm run db:migrate` against a scratch database.
+3. `npm run db:verify` — all three suites.
+4. `npm run db:snapshot` and commit the regenerated `db/schema.sql`.
+
+Numbers are the ordering, so two branches that both add an `000N` collide on
+purpose: the runner refuses and a human renames one.
+
+`npm run db:snapshot -- --check` writes nothing and fails if the committed
+snapshot is stale. That is the CI form, once there is CI.
+
+## Verification suites
+
+All three run inside a transaction they roll back, so they are safe against a
+live database (a scratch one is still the sane choice). All three currently
+pass against PostgreSQL 16.
+
+- **`verify_schema.sql`** (25 checks) — each ledger invariant is actually
+  enforced by the database. The regression suite for the correctness that lives
+  in Postgres rather than in Python.
+- **`verify_roles.sql`** (24 checks) — the `nl_query` role cannot reach the
+  ledger. Run after any change to `roles.sql` or the `ledger_query` views.
+- **`verify_currency.sql`** (22 checks) — toman stays a display unit, rial
+  magnitudes fit, and the Level 0 gate holds.
+- **`verify_rls.sql`** (29 checks) — the application role is actually subject
+  to the tenant policies. Coverage is read from the catalog, so a migration
+  that adds a `workspace_id` column without a policy fails here rather than
+  leaking.
 
 Run `roles.sql` **once per database, not once per cluster.** The `nl_query`
 role is a cluster-level object, but every `GRANT`/`REVOKE` in that file applies
@@ -22,34 +91,6 @@ only to the database it is run against — so a second database in the same
 cluster starts out with `nl_query` able to read its base tables.
 `verify_roles.sql` fails loudly on a database that was missed, which is most of
 why it exists.
-
-`schema.sql` is **not** re-runnable — it is a bootstrap file for a fresh
-database, and applying it twice fails on the first `CREATE TABLE`. That is
-deliberate: `CREATE TABLE IF NOT EXISTS` would silently skip a table whose
-definition had drifted, which on a ledger is worse than an error. Migrations
-are still an open decision (see below). `roles.sql` *is* re-runnable.
-
-Both verification scripts run entirely inside a transaction they roll back, so
-they are safe against a live database, and both exit non-zero naming the first
-check that fails:
-
-- **`verify_schema.sql`** asserts each ledger invariant is actually enforced by
-  the database. Run it after any schema change — it is the regression suite for
-  the parts of correctness that live in Postgres rather than in Python.
-- **`verify_roles.sql`** asserts the `nl_query` role cannot reach the ledger.
-  Run it after any change to `roles.sql` or to the `ledger_query` views.
-
-Both currently pass against PostgreSQL 16.
-
-### Without Docker
-
-If a local Postgres is already running, skip Compose entirely:
-
-```bash
-createdb accounting
-DATABASE_URL="postgresql:///accounting" npm run db:apply
-DATABASE_URL="postgresql:///accounting" npm run db:verify:local
-```
 
 ## What is enforced in the database, and why
 
@@ -79,6 +120,127 @@ UPDATE accounts SET name = $3 WHERE id = $1 AND version = $2;
 
 The database bumps `version` itself, so a client that forgets to increment it
 still cannot silently clobber a concurrent write.
+
+## Currency, toman, and the Level 0 gate
+
+**Toman is a display unit, not a currency.** IRR is the ISO 4217 code; toman
+has none, and one toman is ten rial exactly, always — a fixed denomination like
+dollars-to-cents, not an exchange rate. Modelling it as a second currency would
+put a pair that can never fluctuate through the FX machinery: rounding on a
+relationship that must never round, and a balance sheet able to show FX
+gain/loss between rial and toman.
+
+So the ledger stores rial and toman is presentation — `workspaces.display_unit`
+names it, `display_exponent` shifts it. Rial is the smaller unit, so conversion
+is exact both ways; storing toman would lose the odd rial. A future
+redenomination changes the exponent, not the schema.
+
+`currencies` carries a constraint named
+`currencies_toman_is_a_display_unit_not_a_currency`, so the predictable mistake
+— a developer adding `IRT` because a user asked for toman — fails with that
+sentence as the error message.
+
+The ledger runs at **Level 0**: one currency per workspace. Level 1's columns
+are already in `journal_lines` (`currency`, `original_debit`/`original_credit`,
+`fx_rate`, `fx_rate_source`), held inert by one constraint:
+
+```sql
+ALTER TABLE journal_lines DROP CONSTRAINT journal_lines_single_currency_until_l1;
+```
+
+That drop is the entire schema half of Level 1. It is gated rather than open
+because foreign-currency entries without rate capture in the UI, FX gain/loss
+accounts, and a revaluation decision produce books that balance and are wrong.
+
+The columns are there now rather than later because posted lines are immutable
+by trigger: adding a `NOT NULL` column to them afterwards means disabling that
+trigger to rewrite every posted row, or a nullable column forever with
+`COALESCE` through every report. `0002_currency.sql` already has to switch the
+trigger off for its backfill, with the ledger essentially empty.
+
+`fx_rate` is recorded **per line**, not looked up from a rates table. There is
+no bank feed to source rates from, and in the Iranian market there is no single
+rate to source — official, NIMA and free-market rates differ, and the books must
+record the one actually transacted at. `fx_rate_source` says which.
+
+Amounts are `numeric(24,6)`. `numeric(18,2)` left only sixteen digits ahead of
+the decimal, against a currency where an ordinary SMB invoice runs to ten
+figures. The extra scale is headroom for FX conversion, not a claim that
+fractional rial exist.
+
+Callers do not carry any of this: a `BEFORE INSERT` trigger fills
+`base_currency`, `currency`, the original amounts and an identity rate from the
+workspace. An `INSERT` written before `0002` still works unchanged, which is
+why `verify_schema.sql` needed no edits.
+
+## Tenant isolation: two roles and a session variable
+
+Composite foreign keys make a cross-tenant *reference* structurally
+impossible. They do nothing about a query that simply *reads* the wrong tenant.
+Since `0004`, row-level security closes that: every policy compares
+`workspace_id` against `app_current_workspace()`, which reads the
+`app.workspace_id` set per transaction by `Database.workspace()`.
+
+Unset means **invisible, not unfiltered** — `app_current_workspace()` returns
+NULL, and `workspace_id = NULL` is NULL rather than true. A policy that fell
+back to "all rows" when unscoped would be worse than none, because it would
+look like one.
+
+**The trap, and why the roles are split.** A table's owner is exempt from its
+own policies. Connect the API as the owner and every policy stays in place and
+does nothing — no error, no log line. So:
+
+| Role | Used by | RLS |
+|---|---|---|
+| `accounting` | migrations, provisioning | exempt, by ownership |
+| `accounting_app` | the API, every request | **bound** — non-owner, no BYPASSRLS |
+| `nl_query` | generated text-to-SQL | reaches only `ledger_query` |
+
+That exemption is *wanted* for the owner: migrations legitimately touch every
+tenant's rows — `0002`'s currency backfill is exactly that — and under `FORCE
+ROW LEVEL SECURITY` those statements would match nothing and silently succeed.
+`FORCE` plus a `BYPASSRLS` grant would be equivalent and additionally need
+superuser at setup, which managed Postgres does not always give. So the risk is
+closed where it lives instead:
+
+- `roles.sql` creates `accounting_app` with DML grants, no DDL, no ownership.
+- `verify_rls.sql` asserts it is not a superuser, holds no `BYPASSRLS`, and
+  owns no tables.
+- `packages/api` checks `row_security_active()` at startup and **refuses to
+  serve in server mode** on a connection that can bypass RLS.
+
+**Creating a workspace cannot happen through the app connection** — there is no
+workspace to scope the session to yet. Provisioning and the desktop app's
+first-run setup do it as the owner.
+
+`SET LOCAL`, never plain `SET`. A session-level setting outlives the
+transaction and is still in place for the next borrower of that pooled
+connection, which under pgbouncer in transaction mode is a different request
+for a different tenant.
+
+## Identity
+
+`users` is global; `workspace_members` is the tenant-scoped join carrying the
+role (`owner` / `bookkeeper` / `viewer`). A person with books for two companies
+is one person, so `users` is the second documented exception to "workspace_id
+on every table", after `currencies`. It is scoped for reading by shared
+membership, so one tenant cannot enumerate a hosted install's users.
+
+**Authentication is not in here.** No password hashes, no OIDC subject, no
+sessions — that decision differs by deployment (the desktop app may have no
+login at all) and guessing would bake it into the ledger schema. `users` is
+identity storage; credentials get their own table when that is decided.
+
+`journal_entries` gained `created_by_user_id` and `posted_by_user_id` now
+rather than later, for the same reason as the currency columns: the table is
+immutable once posted, so a column added afterwards can never be backfilled.
+Both reference `users` plainly rather than `workspace_members` — revoking
+someone's membership must not rewrite or block who authored past entries. The
+workspace match is enforced by trigger at INSERT, which is when it is a
+question.
+
+A workspace cannot be left with no owner: that is cross-row, so it is a trigger
+rather than a CHECK.
 
 ## Break-glass: deleting a workspace
 
@@ -186,22 +348,51 @@ listed rather than buried:
   against a statement" flow — somewhere to record the batch and the statement
   it was matched against.
 
+**Decided and now built:**
+
+- **Migrations: numbered SQL + a small runner.** Sqitch is a Perl program and
+  cannot be bundled into an Electron app; Alembic's draw is autogenerate, which
+  needs SQLAlchemy models that do not exist and would not produce this DDL
+  anyway. See the Migrations section above.
+- **Currency: Level 0 behaviour, Level 1 columns, toman as a display unit.**
+  See the currency section above.
+
+- **Users and membership, and row-level security.** Built in `0003` and
+  `0004` — see the two sections above. The owner-bypass trap was handled with a
+  role split and a startup check rather than `FORCE ROW LEVEL SECURITY`, for
+  the reason given in `0004`'s header.
+
+**Decided — not yet written:**
+
+- **Fiscal periods and closing.** Approved. There is no period concept in the
+  schema at all, and a correct P&L needs period boundaries and a notion of a
+  locked period. It interacts with immutability — closing entries are entries,
+  and locking a period is a posting-time check — so it touches trigger logic
+  that `verify_schema.sql` covers. Reports are the acceptance test for
+  `accounts.type`: the five values cannot currently express a contra account
+  (accumulated depreciation is asset-typed with a credit balance), and cash-flow
+  classification has nowhere to live.
+- **Reconciliations.** Needed for the MVP "mark a batch of entries reconciled
+  against a statement" flow — somewhere to record the batch and the statement
+  it was matched against.
+- **Tax: storage seam only.** No rates, jurisdictions or calculation logic in
+  MVP; a place for OCR to put what it extracted. Jurisdiction logic is a quarter
+  of work and not the differentiator.
+- **Outbound invoicing: out of MVP**, explicitly. `documents.kind = 'invoice'`
+  means bills *received*. Sending invoices would need customers, invoice line
+  items, payment status and AR aging — a sales surface bolted onto a
+  bookkeeping product whose differentiator is ingestion.
+
 **Still open:**
-- **Single currency.** `workspaces.base_currency` is the only currency column;
-  lines carry no currency or FX rate. Fine for MVP, structurally awkward to
-  retrofit later. Worth deciding deliberately rather than by default.
-- **Tax.** Only an extracted OCR field in `documents.extracted_fields`. No
-  rates, jurisdictions, or a tax line concept in the ledger.
-- **Row-level security.** Composite FKs stop cross-tenant *references*; they do
-  not stop a buggy query from *reading* the wrong tenant. RLS policies on
-  `workspace_id` would close that for hosted mode. Not added — it changes how
-  every connection must be configured, and you asked to review the schema
-  before it grows.
-- **Migrations.** `schema.sql` is the source of truth for a fresh database,
-  which is correct now and insufficient the moment you have a user with data.
-  Sqitch/Alembic/plain numbered SQL is an unmade decision.
+
 - **ElectricSQL replica identity.** Electric consumes logical replication;
   update/delete events generally need `REPLICA IDENTITY FULL` on synced tables.
   Deliberately not set here — it roughly doubles WAL volume, and the phase-3
   spike should establish what Electric actually requires before it goes into
   the canonical schema.
+- **Level 1 multi-currency.** The schema is ready (drop one constraint). What
+  is not decided: FX gain/loss account handling, and whether period-end
+  revaluation is in scope. Needed before the gate comes off.
+- **Minor-unit enforcement.** `currencies.minor_unit` is recorded but nothing
+  rejects a fractional rial. A trigger could; deferred until posting-time
+  rounding rules are settled, since that is where it belongs.

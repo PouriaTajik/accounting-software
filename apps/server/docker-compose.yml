@@ -1,11 +1,16 @@
 # Self-hosted deployment, and the fastest way to get a real Postgres to run
-# db/schema.sql and db/verify_schema.sql against.
+# the migrations and verification scripts against.
 #
 #   docker compose -f apps/server/docker-compose.yml up --build
 #
-# Postgres applies everything in /docker-entrypoint-initdb.d on first boot of
-# an empty volume, in filename order -- so the schema lands before the API
-# starts taking requests.
+# The database starts EMPTY on purpose. Nothing is mounted into
+# /docker-entrypoint-initdb.d: the migration runner owns schema creation, and
+# a schema applied at first boot would be invisible to it -- the runner would
+# find no schema_migrations table, try to apply 0001 over existing objects,
+# and fail. One thing creates the schema, and it is:
+#
+#   DATABASE_URL=postgresql://accounting:accounting@localhost:5432/accounting \
+#     npm run db:apply
 
 services:
   db:
@@ -18,10 +23,9 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      # Applied automatically on first boot of an empty volume.
-      - ../../db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-      # The whole db/ directory, so verify_schema.sql and roles.sql can be run
-      # on demand. Mounted outside initdb.d so they do NOT run at boot.
+      # The whole db/ directory, so the migrations, roles.sql and the verify
+      # scripts can be run on demand from inside the container. Deliberately
+      # NOT mounted into /docker-entrypoint-initdb.d -- see the note above.
       - ../../db:/db:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U accounting -d accounting"]
@@ -35,7 +39,12 @@ services:
       dockerfile: apps/server/Dockerfile
     environment:
       ACCOUNTING_DEPLOYMENT_MODE: server
-      ACCOUNTING_DATABASE_URL: postgresql://accounting:accounting@db:5432/accounting
+      # accounting_app, NOT accounting. The owner of the tables is exempt from
+      # their row-level security policies, so connecting as `accounting` here
+      # would leave migration 0004's tenant isolation inert. The API checks
+      # this at startup and refuses to serve in server mode.
+      # Created by db/roles.sql; the password below is its dev-only default.
+      ACCOUNTING_DATABASE_URL: postgresql://accounting_app:changeme-dev-only@db:5432/accounting
       # Generated text-to-SQL runs as this role, not as the app role.
       # Create it with db/roles.sql, then uncomment:
       # ACCOUNTING_NL_QUERY_DATABASE_URL: postgresql://nl_query:CHANGEME@db:5432/accounting

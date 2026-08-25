@@ -16,7 +16,7 @@ Design decisions live in [ARCHITECTURE.md](ARCHITECTURE.md),
 | Phase | Scope | State |
 |---|---|---|
 | 1 | Monorepo scaffold, Postgres schema, FastAPI skeleton | **done, under review** |
-| 2 | Ledger logic, AI layer, OCR, categorization, anomalies, NL query | not started |
+| 2 | Ledger logic, AI layer, OCR, categorization, anomalies, NL query | migrations + currency done; rest not started |
 | 3 | ElectricSQL write-path spike (throwaway) | not started |
 | 4 | Electron + React shell | not started |
 
@@ -35,8 +35,10 @@ packages/
   ui/             Design system (phase 4)
   sync/           ElectricSQL wiring (phase 3)
 db/
-  schema.sql      Canonical schema — one schema for local and hosted alike
-  verify_schema.sql   Proves the ledger invariants are actually enforced
+  migrations/     Numbered SQL, applied in order. The source of truth
+  schema.sql      Generated snapshot of the migrated schema, for reading
+  verify_*.sql    Prove the invariants, the role isolation and the currency
+                  model are actually enforced, not merely intended
   roles.sql       The read-only role that generated text-to-SQL runs as
 design-tokens/    Colors, radius, RTL/LTR typography
 ```
@@ -54,11 +56,18 @@ npm run api:install
 npm run api:test
 ```
 
-Bring up Postgres, apply the schema, and check that the invariants hold:
+Bring up Postgres, apply the migrations and roles, and check that the
+invariants hold:
 
 ```bash
-npm run db:up && npm run db:verify
+npm run db:up
+export DATABASE_URL="postgresql://accounting:accounting@localhost:5432/accounting"
+npm run db:apply && npm run db:verify
 ```
+
+`DATABASE_URL` points at any Postgres — the Compose one above, a scratch
+database, or an embedded desktop instance. Compose starts the database empty on
+purpose: the migration runner is the only thing that creates the schema.
 
 Then run the API against it:
 
