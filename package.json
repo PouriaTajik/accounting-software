@@ -25,7 +25,9 @@
     "db:snapshot": "node scripts/snapshot-schema.mjs",
     "api:install": "pip install -e packages/ai && pip install -e packages/api[dev]",
     "api:dev": "uvicorn accounting_api.main:app --reload --port 8000",
-    "api:test": "pytest packages/api"
+    "api:test": "pytest packages/api",
+    "//desktop": "Electron + React shell. Needs the API (npm run api:dev) and Postgres (npm run db:up) already running -- it does not start either yet.",
+    "desktop:dev": "npm run dev --workspace=@accounting/desktop"
   },
   "repository": {
     "type": "git",
