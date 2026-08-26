@@ -29,7 +29,7 @@ async def update_account(
     account_id: UUID, payload: AccountUpdate, workspace_id: WorkspaceId, db: Db
 ):
     """Requires the `version` last read; see errors.VersionConflict."""
-    fields = payload.model_dump(exclude={"version"})
+    fields = payload.model_dump(exclude={"version"}, exclude_unset=True)
     async with db.workspace(workspace_id) as connection:
         return await accounts_core.update_account(
             connection, account_id, expected_version=payload.version, **fields

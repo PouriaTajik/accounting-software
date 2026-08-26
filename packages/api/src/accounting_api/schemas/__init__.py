@@ -16,6 +16,7 @@ from .journal import (
     JournalLineIn,
     ReverseEntry,
 )
+from .workspaces import Workspace, WorkspaceCreate, WorkspaceUpdate
 
 __all__ = [
     "Account",
@@ -31,4 +32,7 @@ __all__ = [
     "OptimisticUpdate",
     "Page",
     "ReverseEntry",
+    "Workspace",
+    "WorkspaceCreate",
+    "WorkspaceUpdate",
 ]

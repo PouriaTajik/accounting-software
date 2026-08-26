@@ -23,8 +23,8 @@
 --
 
 
--- Dumped from database version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
--- Dumped by pg_dump version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
+-- Dumped from database version 16.15
+-- Dumped by pg_dump version 16.14
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -373,6 +373,21 @@ BEGIN
     END IF;
 
     RETURN CASE TG_OP WHEN 'DELETE' THEN OLD ELSE NEW END;
+END;
+$$;
+
+
+--
+-- Name: guard_workspace_version(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_workspace_version() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    new.version    := old.version + 1;
+    new.updated_at := now();
+    RETURN new;
 END;
 $$;
 
@@ -1138,6 +1153,13 @@ CREATE TRIGGER trg_workspace_members_keep_an_owner BEFORE DELETE OR UPDATE ON pu
 --
 
 CREATE TRIGGER trg_workspace_members_version BEFORE UPDATE ON public.workspace_members FOR EACH ROW EXECUTE FUNCTION public.guard_mutable_row();
+
+
+--
+-- Name: workspaces trg_workspaces_version; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_workspaces_version BEFORE UPDATE ON public.workspaces FOR EACH ROW EXECUTE FUNCTION public.guard_workspace_version();
 
 
 --

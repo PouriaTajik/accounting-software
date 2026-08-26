@@ -44,6 +44,17 @@ class Settings(BaseSettings):
     #: role cannot be switched on per query.
     nl_query_database_url: str | None = None
 
+    #: Creating a workspace is the one write `accounting_app` structurally
+    #: cannot make: row-level security compares `workspace_id` against
+    #: `app_current_workspace()`, and there is no workspace to scope the
+    #: session to yet (db/README.md, "Creating a workspace cannot happen
+    #: through the app connection"). This authenticates as the table owner
+    #: instead -- exempt from RLS by ownership, per db/roles.sql -- so it is
+    #: deliberately unset by default rather than defaulted to anything, unlike
+    #: `database_url` above: a shipped default for an RLS-bypassing role is a
+    #: standing risk that a shipped default for the RLS-bound one is not.
+    provisioning_database_url: str | None = None
+
     db_pool_min_size: int = 1
     db_pool_max_size: int = 10
 

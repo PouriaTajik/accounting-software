@@ -45,6 +45,7 @@ class Database:
         self._settings = settings
         self._pool: asyncpg.Pool | None = None
         self._nl_query_pool: asyncpg.Pool | None = None
+        self._provisioning_pool: asyncpg.Pool | None = None
 
     async def connect(self) -> None:
         self._pool = await asyncpg.create_pool(
@@ -60,6 +61,13 @@ class Database:
                 self._settings.nl_query_database_url,
                 min_size=0,
                 max_size=4,
+            )
+
+        if self._settings.provisioning_database_url:
+            self._provisioning_pool = await asyncpg.create_pool(
+                self._settings.provisioning_database_url,
+                min_size=0,
+                max_size=2,
             )
 
     async def _assert_row_security_enforced(
@@ -114,11 +122,12 @@ class Database:
         logger.warning("%s", message)
 
     async def disconnect(self) -> None:
-        for pool in (self._pool, self._nl_query_pool):
+        for pool in (self._pool, self._nl_query_pool, self._provisioning_pool):
             if pool is not None:
                 await pool.close()
         self._pool = None
         self._nl_query_pool = None
+        self._provisioning_pool = None
 
     @property
     def is_connected(self) -> bool:
@@ -177,6 +186,27 @@ class Database:
                 "SELECT set_config('app.workspace_id', $1, true)",
                 str(workspace_id),
             )
+            yield connection
+
+    @asynccontextmanager
+    async def provision(self) -> AsyncIterator[asyncpg.Connection]:
+        """A connection for the one write `accounting_app` cannot make: creating
+        a workspace.
+
+        Row-level security compares `workspace_id` against
+        `app_current_workspace()`, and there is no workspace to scope the
+        session to yet -- so this authenticates as the table owner instead,
+        exempt from RLS by ownership rather than by any setting on this
+        connection (db/README.md, "Creating a workspace cannot happen through
+        the app connection").
+        """
+        if self._provisioning_pool is None:
+            raise RuntimeError(
+                "provisioning_database_url is required to create a workspace. "
+                "It must authenticate as the table owner (accounting), never as "
+                "accounting_app -- see db/roles.sql."
+            )
+        async with self._provisioning_pool.acquire() as connection, connection.transaction():
             yield connection
 
     async def ping(self) -> bool:
