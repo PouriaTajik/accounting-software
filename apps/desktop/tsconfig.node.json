@@ -8,8 +8,7 @@
     "types": ["electron-vite/node"],
     "strict": true,
     "esModuleInterop": true,
-    "skipLibCheck": true,
-    "noEmit": true
+    "skipLibCheck": true
   },
   "include": ["src/main/**/*", "src/preload/**/*", "electron.vite.config.ts"]
 }
