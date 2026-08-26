@@ -46,6 +46,7 @@ class Database:
         self._pool: asyncpg.Pool | None = None
         self._nl_query_pool: asyncpg.Pool | None = None
         self._provisioning_pool: asyncpg.Pool | None = None
+        self._auth_pool: asyncpg.Pool | None = None
 
     async def connect(self) -> None:
         self._pool = await asyncpg.create_pool(
@@ -69,6 +70,14 @@ class Database:
                 min_size=0,
                 max_size=2,
             )
+
+        # Unlike nl_query_pool, connected unconditionally: auth is load-
+        # bearing for every request now, not an optional phase-2 feature.
+        self._auth_pool = await asyncpg.create_pool(
+            self._settings.auth_database_url,
+            min_size=0,
+            max_size=4,
+        )
 
     async def _assert_row_security_enforced(
         self, connection: asyncpg.Connection
@@ -122,12 +131,13 @@ class Database:
         logger.warning("%s", message)
 
     async def disconnect(self) -> None:
-        for pool in (self._pool, self._nl_query_pool, self._provisioning_pool):
+        for pool in (self._pool, self._nl_query_pool, self._provisioning_pool, self._auth_pool):
             if pool is not None:
                 await pool.close()
         self._pool = None
         self._nl_query_pool = None
         self._provisioning_pool = None
+        self._auth_pool = None
 
     @property
     def is_connected(self) -> bool:
@@ -207,6 +217,24 @@ class Database:
                 "accounting_app -- see db/roles.sql."
             )
         async with self._provisioning_pool.acquire() as connection, connection.transaction():
+            yield connection
+
+    @asynccontextmanager
+    async def auth(self) -> AsyncIterator[asyncpg.Connection]:
+        """A connection for identity operations: registration, login, session
+        resolution.
+
+        Authenticates as `accounting_auth` (db/roles.sql) -- narrow grants on
+        users/user_credentials/sessions/workspace_members only, no reach into
+        ledger data. Deliberately never calls `SET LOCAL app.workspace_id`:
+        identity is global (db/README.md, "Identity"), and this connection's
+        whole purpose is answering "which user, which workspaces" *across*
+        every tenant at once, the one read `accounting_app`'s workspace-bound
+        policies are built to prevent.
+        """
+        if self._auth_pool is None:
+            raise RuntimeError("Database.connect() has not been called")
+        async with self._auth_pool.acquire() as connection, connection.transaction():
             yield connection
 
     async def ping(self) -> bool:

@@ -11,11 +11,13 @@ from . import (
     accounts,
     ai_config,
     anomalies,
+    auth,
     categorization,
     documents,
     health,
     imports,
     journal,
+    members,
     query,
     workspaces,
 )
@@ -23,7 +25,9 @@ from . import (
 #: Registered in this order by `create_app()`.
 ALL_ROUTERS = [
     health.router,
+    auth.router,
     workspaces.router,
+    members.router,
     ai_config.router,
     accounts.router,
     journal.router,

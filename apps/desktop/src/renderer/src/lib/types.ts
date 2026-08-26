@@ -82,3 +82,35 @@ export interface DomainErrorPayload {
   message: string;
   [key: string]: unknown;
 }
+
+export type Role = "owner" | "bookkeeper" | "viewer";
+
+export interface User {
+  id: string;
+  email: string;
+  display_name: string | null;
+  is_active: boolean;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Membership {
+  workspace_id: string;
+  role: Role;
+}
+
+export interface Me {
+  user: User;
+  memberships: Membership[];
+}
+
+/** A row from GET /workspaces/{id}/members -- membership joined with the
+ * member's own identity, not the bare join table shape. */
+export interface WorkspaceMember {
+  user_id: string;
+  role: Role;
+  version: number;
+  email: string;
+  display_name: string | null;
+}

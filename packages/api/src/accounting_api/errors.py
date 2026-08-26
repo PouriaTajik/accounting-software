@@ -130,6 +130,69 @@ class AIProviderNotConfigured(DomainError):
     code = "ai_provider_not_configured"
 
 
+class InvalidCredentials(DomainError):
+    """Login failed: wrong email, wrong password, or a deactivated user.
+
+    Deliberately one error for all three -- distinguishing "no such email"
+    from "wrong password" in the response would let an attacker enumerate
+    registered addresses.
+    """
+
+    status_code = 401
+    code = "invalid_credentials"
+
+
+class NotAuthenticated(DomainError):
+    """No valid session -- missing, expired, or revoked cookie."""
+
+    status_code = 401
+    code = "not_authenticated"
+
+
+class NotAMember(DomainError):
+    """The current user has no membership row in the requested workspace."""
+
+    status_code = 403
+    code = "not_a_member"
+
+
+class InsufficientRole(DomainError):
+    """The current user's role in this workspace doesn't clear the bar this
+    endpoint requires (e.g. a `viewer` attempting a `bookkeeper` action)."""
+
+    status_code = 403
+    code = "insufficient_role"
+
+
+class UserNotFound(NotFound):
+    """No account exists with the given email -- surfaced when adding a
+    workspace member, since invites are existing-accounts-only (they must
+    register first)."""
+
+    code = "user_not_found"
+
+
+class InvalidResetToken(DomainError):
+    """A password-reset token that's missing, expired, or already used."""
+
+    status_code = 400
+    code = "invalid_reset_token"
+
+
+class LastOwnerCannotBeRemoved(DomainError):
+    """Demoting or removing this member would leave the workspace with no
+    owner -- `guard_workspace_keeps_an_owner` (migration 0003)."""
+
+    status_code = 409
+    code = "last_owner_cannot_be_removed"
+
+
+class MemberNotFound(NotFound):
+    """No `workspace_members` row for this (workspace, user) pair."""
+
+    code = "member_not_found"
+
+
 class UnsafeGeneratedQuery(DomainError):
     """Text-to-SQL produced something the query guard refused to execute."""
 
@@ -168,6 +231,8 @@ def translate_database_error(exc: Exception) -> DomainError | None:
             return PeriodLocked(message)
         if "fiscal year" in message and "is closed" in message:
             return FiscalYearClosed(message)
+        if "would be left with no owner" in message:
+            return LastOwnerCannotBeRemoved(message)
         # Posted-entry/-line immutability, and the insert-must-be-a-draft guard.
         return PostedEntryImmutable(message)
 

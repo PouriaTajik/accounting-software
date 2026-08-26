@@ -15,7 +15,8 @@
 --
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
 --        -v nl_query_password="'<generated-secret>'" \
---        -v app_password="'<generated-secret>'" -f db/roles.sql
+--        -v app_password="'<generated-secret>'" \
+--        -v auth_password="'<generated-secret>'" -f db/roles.sql
 --
 -- Two roles, for two different threats.
 --
@@ -30,6 +31,16 @@
 --                   owner would leave 0004's policies in place and inert --
 --                   the same shape of failure as a REVOKE that looks applied
 --                   and is not.
+--
+--   accounting_auth The connection identity operations (register, login,
+--                   session resolution) use. Identity is global (0003/0004's
+--                   "Identity" section) -- login has to read across every
+--                   tenant to answer "which user, which workspaces" -- so it
+--                   cannot be accounting_app, whose whole point is being
+--                   bound to one workspace at a time. Narrow the other way
+--                   instead: no reach into any ledger table at all, only
+--                   users/user_credentials/sessions/workspace_members
+--                   (0007), same "capability, not policy" shape as nl_query.
 --
 -- Capability, not prompt instructions and not code review, is the control.
 -- =============================================================================
@@ -174,11 +185,57 @@ REVOKE ALL ON schema_migrations FROM accounting_app;
 -- The API reads base tables directly, under RLS.
 REVOKE ALL ON SCHEMA ledger_query FROM accounting_app;
 
+-- Identity tables (0007): only accounting_auth touches these. Without this,
+-- ALTER DEFAULT PRIVILEGES above would silently hand accounting_app read/
+-- write on password hashes and session tokens the moment 0007 created the
+-- tables -- the same trap currencies and schema_migrations are locked down
+-- against just above.
+REVOKE ALL ON user_credentials FROM accounting_app;
+REVOKE ALL ON sessions FROM accounting_app;
+REVOKE ALL ON password_reset_tokens FROM accounting_app;
+
+
+-- -----------------------------------------------------------------------------
+-- accounting_auth: the role identity operations connect as
+-- -----------------------------------------------------------------------------
+-- Exists for one reason: login and registration have to read across every
+-- tenant (0007's "Identity is global" policies), which accounting_app
+-- structurally cannot do -- every one of its policies requires
+-- app.workspace_id to already be set to a single workspace. Rather than
+-- widen accounting_app for this one need, a second narrow role gets exactly
+-- the tables identity requires and nothing else, same shape as nl_query.
+
+DO $do$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'accounting_auth') THEN
+        CREATE ROLE accounting_auth LOGIN;
+    END IF;
+END;
+$do$;
+
+ALTER ROLE accounting_auth PASSWORD :auth_password;
+ALTER ROLE accounting_auth NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+
+GRANT USAGE ON SCHEMA public TO accounting_auth;
+
+-- Registration reads (duplicate-email check) and writes `users`; 0007's
+-- users_auth_full_access policy is what actually admits the cross-tenant
+-- read this role needs -- the grant alone would still be blocked by RLS.
+GRANT SELECT, INSERT ON users TO accounting_auth;
+GRANT SELECT, INSERT, UPDATE ON user_credentials TO accounting_auth;
+GRANT SELECT, INSERT, UPDATE ON sessions TO accounting_auth;
+GRANT SELECT, INSERT, UPDATE ON password_reset_tokens TO accounting_auth;
+
+-- Read-only: membership rows themselves are still created and changed
+-- through accounting_app, workspace-scoped, exactly as before. This is only
+-- for "which workspaces does this session's user belong to, and as what".
+GRANT SELECT ON workspace_members TO accounting_auth;
+
 
 -- -----------------------------------------------------------------------------
 -- Sanity check
 -- -----------------------------------------------------------------------------
--- db/verify_roles.sql and db/verify_rls.sql assert all of this. To watch the
+-- db/verify_auth.sql and db/verify_rls.sql assert all of this. To watch the
 -- login-time behaviour by hand, which neither can (role settings apply at
 -- login, and SET ROLE does not trigger them):
 --
@@ -193,3 +250,12 @@ REVOKE ALL ON SCHEMA ledger_query FROM accounting_app;
 --   psql "postgresql://accounting_app:<secret>@host/db" -c \
 --     "SET app.workspace_id = '<uuid>'; SELECT count(*) FROM journal_lines;"
 --   -- expected: that workspace's lines, and only those
+--
+--   psql "postgresql://accounting_auth:<secret>@host/db" -c \
+--     "SELECT * FROM public.journal_lines;"
+--   -- expected: ERROR: permission denied for table journal_lines
+--
+--   psql "postgresql://accounting_auth:<secret>@host/db" -c \
+--     "SELECT * FROM public.users;"
+--   -- expected: every user across every tenant -- identity is global by
+--   -- design, and this is the one role meant to see that

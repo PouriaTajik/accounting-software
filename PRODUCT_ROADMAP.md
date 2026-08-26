@@ -34,6 +34,36 @@ is actually built, not just whether it's in scope.
 - Mark a batch of entries reconciled against a statement (manual, since
   there's no live feed to check against automatically)
 
+**Reports**
+- P&L and balance sheet, computed on-demand via SQL against posted entries
+  — no precomputed/materialized balances. Matches the immutable-ledger
+  design and is the simplest thing that could work at MVP transaction
+  volumes. Cash flow statement follows once these two are proven.
+- Tax is a stored/display field only (from OCR extraction or manual entry)
+  — no rate tables, jurisdiction logic, or tax calculation. Revisit as its
+  own decision if/when real tax reporting is needed.
+
+**Access control**
+- Password + session auth added to `packages/api` (credentials table with a
+  hashed password, session cookies) — one auth path for both `apps/desktop`
+  and `apps/server`, rather than desktop skipping auth. `users` has no
+  credential columns yet (deliberately, per migration 0003); this is where
+  they land. OIDC/SSO can layer on later as a paid enterprise option without
+  touching the session-consuming authorization code.
+- `workspace_members.role` (`owner` / `bookkeeper` / `viewer`) already
+  exists in the schema (migration 0003) and is currently unenforced —
+  the remaining work is a FastAPI dependency that resolves the current user
+  from the session and checks role against the requested action.
+- This lands in MVP, before cowork, not alongside it as originally assumed:
+  auth is what makes "more than one person reaches a shared workspace" a
+  real scenario even without realtime sync, so role enforcement matters as
+  soon as auth exists.
+
+**Audit trail**
+- Simple read-only activity view surfacing what the immutable ledger already
+  stores for free: `created_by`/`posted_by`, timestamps, reversing-entry
+  chains. No new schema required.
+
 **Platform**
 - Electron desktop app, Mac + Windows
 - English (LTR) + Persian (RTL) from day one
@@ -53,25 +83,10 @@ is actually built, not just whether it's in scope.
   for (custom fields, custom categorization rules, custom report templates)
   during MVP so customization isn't a rewrite later
 
-## Open questions — not yet decided, needed before their build phase
+## Not currently planned
 
-These came up as reasonable extrapolations but haven't been confirmed. Flag
-and decide before the phase that depends on them, rather than assuming:
-
-- **Reports** (P&L, balance sheet, cash flow) — the schema supports these,
-  but no report-generation design has been discussed. Almost certainly
-  needed before MVP is usable as real accounting software — worth deciding
-  early even though it wasn't in the original feature discussion.
-- **Outbound invoicing** (sending invoices to customers, vs. `documents.kind
-  = 'invoice'` currently meaning bills received) — ambiguous in the schema
-  as written; needs a decision on whether outbound invoicing is in scope at
-  all.
-- **Tax handling** — sales tax/VAT rates and jurisdiction logic; currently
-  only an extracted OCR field with no calculation logic behind it.
-- **User roles/permissions** — nothing yet distinguishes an owner from a
-  bookkeeper from a read-only viewer. This likely needs to land before or
-  alongside the cowork feature, since multi-user access without roles is a
-  real risk once real books are shared.
-- **Audit log / activity history UI** — the immutable-ledger design produces
-  this data for free, but surfacing it as a user-facing audit trail is a
-  separate UI decision not yet made.
+- **Outbound invoicing** (sending invoices to customers) — out of scope.
+  This is bookkeeping/accounting software, not AR/invoicing software;
+  `documents.kind = 'invoice'` continues to mean bills received only.
+  Revisit only if customers actually ask for it, rather than building it
+  speculatively into an already-large MVP.

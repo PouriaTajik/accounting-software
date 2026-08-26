@@ -101,8 +101,11 @@ BEGIN
         (SELECT bool_and(c.relrowsecurity)
            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
           WHERE n.nspname = 'public'
-            AND c.relname IN ('workspaces', 'users')),
-        'workspaces and users are protected despite having no workspace_id');
+            AND c.relname IN (
+                'workspaces', 'users', 'user_credentials', 'sessions', 'password_reset_tokens'
+            )),
+        'workspaces, users, and the identity tables (0007/0008) are protected '
+        || 'despite having no workspace_id');
 END;
 $coverage$;
 

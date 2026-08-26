@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter
 
 from ..core import ledger
-from ..deps import Db, WorkspaceId
+from ..deps import Bookkeeper, Db, Member, WorkspaceId
 from ..schemas.common import OptimisticUpdate, Page
 from ..schemas.journal import (
     JournalEntry,
@@ -26,6 +26,7 @@ router = APIRouter(prefix="/journal-entries", tags=["ledger"])
 @router.get("", response_model=Page[JournalEntry])
 async def list_entries(
     workspace_id: WorkspaceId,
+    member: Member,
     db: Db,
     status: str | None = None,
     limit: int = 100,
@@ -40,7 +41,9 @@ async def list_entries(
 
 
 @router.post("", status_code=201, response_model=JournalEntryDetail)
-async def create_draft_entry(payload: JournalEntryCreate, workspace_id: WorkspaceId, db: Db):
+async def create_draft_entry(
+    payload: JournalEntryCreate, workspace_id: WorkspaceId, member: Bookkeeper, db: Db
+):
     """Always creates a draft.
 
     `posted_at` cannot be set at insert time; the database rejects it, so
@@ -58,14 +61,18 @@ async def create_draft_entry(payload: JournalEntryCreate, workspace_id: Workspac
 
 
 @router.get("/{entry_id}", response_model=JournalEntryDetail)
-async def get_entry(entry_id: UUID, workspace_id: WorkspaceId, db: Db):
+async def get_entry(entry_id: UUID, workspace_id: WorkspaceId, member: Member, db: Db):
     async with db.workspace(workspace_id) as connection:
         return await ledger.get_entry(connection, entry_id)
 
 
 @router.patch("/{entry_id}", response_model=JournalEntryDetail)
 async def update_draft_entry(
-    entry_id: UUID, payload: JournalEntryUpdate, workspace_id: WorkspaceId, db: Db
+    entry_id: UUID,
+    payload: JournalEntryUpdate,
+    workspace_id: WorkspaceId,
+    member: Bookkeeper,
+    db: Db,
 ):
     """Drafts only. Editing a posted entry returns 409 posted_entry_immutable."""
     fields = payload.model_dump(exclude={"version", "lines"}, exclude_unset=True)
@@ -78,7 +85,7 @@ async def update_draft_entry(
 
 @router.delete("/{entry_id}", status_code=204)
 async def delete_draft_entry(
-    entry_id: UUID, payload: OptimisticUpdate, workspace_id: WorkspaceId, db: Db
+    entry_id: UUID, payload: OptimisticUpdate, workspace_id: WorkspaceId, member: Bookkeeper, db: Db
 ):
     """Drafts only. A posted entry is never deleted -- it is reversed."""
     async with db.workspace(workspace_id) as connection:
@@ -86,7 +93,9 @@ async def delete_draft_entry(
 
 
 @router.post("/{entry_id}/post", response_model=JournalEntryDetail)
-async def post_entry(entry_id: UUID, payload: OptimisticUpdate, workspace_id: WorkspaceId, db: Db):
+async def post_entry(
+    entry_id: UUID, payload: OptimisticUpdate, workspace_id: WorkspaceId, member: Bookkeeper, db: Db
+):
     """Draft -> posted. Irreversible.
 
     Balance is validated by the database during the transition, so an
@@ -97,7 +106,9 @@ async def post_entry(entry_id: UUID, payload: OptimisticUpdate, workspace_id: Wo
 
 
 @router.post("/{entry_id}/reverse", status_code=201, response_model=JournalEntryDetail)
-async def reverse_entry(entry_id: UUID, payload: ReverseEntry, workspace_id: WorkspaceId, db: Db):
+async def reverse_entry(
+    entry_id: UUID, payload: ReverseEntry, workspace_id: WorkspaceId, member: Bookkeeper, db: Db
+):
     """The only correction mechanism for posted data.
 
     Creates a new entry with mirrored lines, `source = 'reversal'` and

@@ -55,6 +55,44 @@ class Settings(BaseSettings):
     #: standing risk that a shipped default for the RLS-bound one is not.
     provisioning_database_url: str | None = None
 
+    #: Identity operations (register, login, session resolution) authenticate
+    #: as `accounting_auth` from db/roles.sql: narrow grants on
+    #: users/user_credentials/sessions/workspace_members, no reach into
+    #: ledger data. Unlike `provisioning_database_url`, this gets a working
+    #: default -- `accounting_auth` is not RLS-exempt (0007), so it carries
+    #: the same risk profile as `database_url`'s default, not
+    #: `provisioning_database_url`'s.
+    auth_database_url: str = "postgresql://accounting_auth:accounting@localhost:5432/accounting"
+
+    #: Name of the session cookie set by POST /auth/login and /auth/register.
+    session_cookie_name: str = "accounting_session"
+
+    #: How long a session stays valid after creation. No sliding refresh yet
+    #: -- a session is issued once and simply expires; re-authenticating is
+    #: the only renewal path for now.
+    session_ttl_days: int = 30
+
+    #: How long a password-reset link/token stays valid.
+    password_reset_ttl_minutes: int = 30
+
+    #: SMTP is genuinely optional -- most installs of this software are a
+    #: single desktop machine, where "email a reset link" doesn't make sense
+    #: (BUSINESS_PRINCIPLES.md: self-hosted-first). Unset by default;
+    #: `mail.send_mail` logs instead of sending when `smtp_host` is None, so
+    #: the password-reset feature stays fully functional either way.
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from_address: str = "accounting@localhost"
+    smtp_use_tls: bool = True
+
+    #: Where the reset link points. No dashboard consumes this path yet
+    #: (only apps/desktop and apps/server exist, per ARCHITECTURE.md) --
+    #: the desktop app's own reset screen takes a pasted token instead, so
+    #: this link is a forward-compatible courtesy, not load-bearing today.
+    app_base_url: str = "http://localhost:5173"
+
     db_pool_min_size: int = 1
     db_pool_max_size: int = 10
 

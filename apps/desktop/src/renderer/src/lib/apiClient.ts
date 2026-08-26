@@ -3,11 +3,22 @@ import type {
   DomainErrorPayload,
   JournalEntry,
   JournalEntryDetail,
+  Me,
   Page,
+  Role,
+  User,
   Workspace,
+  WorkspaceMember,
 } from "./types";
 
-const BASE_URL = "http://127.0.0.1:8000/api/v1";
+// "localhost", not "127.0.0.1" -- the two are different *sites* for
+// SameSite cookie purposes (SameSite compares the host string, not the
+// resolved address), and ACCOUNTING_CORS_ALLOW_ORIGINS is already
+// http://localhost:5173 (see .env.example). A mismatch here is harmless
+// until a session cookie is involved: SameSite=lax then silently drops it
+// on every cross-site fetch, which looks exactly like "login succeeded but
+// nothing else believes it."
+const BASE_URL = "http://localhost:8000/api/v1";
 
 export class ApiError extends Error {
   constructor(
@@ -36,6 +47,11 @@ async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<
     headers,
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
     signal: options.signal,
+    // The API and the dev server are different origins (127.0.0.1:8000 vs
+    // localhost:5173), so the session cookie set by POST /auth/login is
+    // neither stored nor replayed without this -- main.py already sets
+    // allow_credentials=True on CORS to allow it.
+    credentials: "include",
   });
 
   if (response.status === 204) return undefined as T;
@@ -177,4 +193,65 @@ export function reverseJournalEntry(
     workspaceId,
     body: { memo },
   });
+}
+
+// --- auth ---------------------------------------------------------------
+
+export function register(input: {
+  email: string;
+  password: string;
+  display_name?: string;
+}): Promise<User> {
+  return apiFetch("/auth/register", { method: "POST", body: input });
+}
+
+export function login(input: { email: string; password: string }): Promise<User> {
+  return apiFetch("/auth/login", { method: "POST", body: input });
+}
+
+export function logout(): Promise<void> {
+  return apiFetch("/auth/logout", { method: "POST" });
+}
+
+export function getMe(signal?: AbortSignal): Promise<Me> {
+  return apiFetch("/auth/me", { signal });
+}
+
+export function requestPasswordReset(email: string): Promise<{ detail: string }> {
+  return apiFetch("/auth/password-reset/request", { method: "POST", body: { email } });
+}
+
+export function confirmPasswordReset(token: string, newPassword: string): Promise<void> {
+  return apiFetch("/auth/password-reset/confirm", {
+    method: "POST",
+    body: { token, new_password: newPassword },
+  });
+}
+
+// --- workspace members ---------------------------------------------------
+
+export function listMembers(workspaceId: string): Promise<WorkspaceMember[]> {
+  return apiFetch(`/workspaces/${workspaceId}/members`);
+}
+
+export function addMember(
+  workspaceId: string,
+  input: { email: string; role: Role },
+): Promise<WorkspaceMember> {
+  return apiFetch(`/workspaces/${workspaceId}/members`, { method: "POST", body: input });
+}
+
+export function updateMemberRole(
+  workspaceId: string,
+  userId: string,
+  input: { role: Role; version: number },
+): Promise<WorkspaceMember> {
+  return apiFetch(`/workspaces/${workspaceId}/members/${userId}`, {
+    method: "PATCH",
+    body: input,
+  });
+}
+
+export function removeMember(workspaceId: string, userId: string): Promise<void> {
+  return apiFetch(`/workspaces/${workspaceId}/members/${userId}`, { method: "DELETE" });
 }

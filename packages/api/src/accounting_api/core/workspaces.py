@@ -38,9 +38,20 @@ async def create_workspace(
     connection: asyncpg.Connection,
     *,
     name: str,
+    owner_user_id: UUID,
     base_currency: str = "USD",
     fiscal_calendar: str = "gregorian",
 ) -> dict[str, Any]:
+    """Create a workspace and seat its first member as `owner`, in one
+    transaction (the caller's `db.provision()` block already opened one).
+
+    Without this, a freshly created workspace would have no owner at all --
+    `workspace_members`'s own "keep at least one owner" trigger (migration
+    0003) only guards demotions and removals, not a workspace that starts
+    with zero members. Role enforcement (`deps.require_role`) has nothing to
+    check the first time a workspace exists unless this is atomic with
+    creating it.
+    """
     row = await connection.fetchrow(
         f"""
         INSERT INTO workspaces (name, base_currency, fiscal_calendar)
@@ -50,6 +61,11 @@ async def create_workspace(
         name,
         base_currency,
         fiscal_calendar,
+    )
+    await connection.execute(
+        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
+        row["id"],
+        owner_user_id,
     )
     return dict(row)
 

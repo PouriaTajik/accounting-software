@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter
 
 from ..core import accounts as accounts_core
-from ..deps import Db, WorkspaceId
+from ..deps import Bookkeeper, Db, Member, WorkspaceId
 from ..schemas.accounts import Account, AccountCreate, AccountUpdate
 from ..schemas.common import OptimisticUpdate
 
@@ -13,20 +13,24 @@ router = APIRouter(prefix="/accounts", tags=["accounts"])
 
 
 @router.get("", response_model=list[Account])
-async def list_accounts(workspace_id: WorkspaceId, db: Db, include_archived: bool = False):
+async def list_accounts(
+    workspace_id: WorkspaceId, member: Member, db: Db, include_archived: bool = False
+):
     async with db.workspace(workspace_id) as connection:
         return await accounts_core.list_accounts(connection, include_archived=include_archived)
 
 
 @router.post("", status_code=201, response_model=Account)
-async def create_account(payload: AccountCreate, workspace_id: WorkspaceId, db: Db):
+async def create_account(
+    payload: AccountCreate, workspace_id: WorkspaceId, member: Bookkeeper, db: Db
+):
     async with db.workspace(workspace_id) as connection:
         return await accounts_core.create_account(connection, **payload.model_dump())
 
 
 @router.patch("/{account_id}", response_model=Account)
 async def update_account(
-    account_id: UUID, payload: AccountUpdate, workspace_id: WorkspaceId, db: Db
+    account_id: UUID, payload: AccountUpdate, workspace_id: WorkspaceId, member: Bookkeeper, db: Db
 ):
     """Requires the `version` last read; see errors.VersionConflict."""
     fields = payload.model_dump(exclude={"version"}, exclude_unset=True)
@@ -38,7 +42,11 @@ async def update_account(
 
 @router.post("/{account_id}/archive", response_model=Account)
 async def archive_account(
-    account_id: UUID, payload: OptimisticUpdate, workspace_id: WorkspaceId, db: Db
+    account_id: UUID,
+    payload: OptimisticUpdate,
+    workspace_id: WorkspaceId,
+    member: Bookkeeper,
+    db: Db,
 ):
     """Archive rather than delete: an account referenced by a posted entry can
     never be removed, because the entry it belongs to can never be rewritten."""
